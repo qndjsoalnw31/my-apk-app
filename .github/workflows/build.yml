@@ -11,13 +11,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Unzip project with hidden files
+      - name: Extract ZIP directly to root
         run: |
-          unzip substack-downloader.zip -d extracted
-          # البحث عن المجلد الذي يحتوي على build.gradle.kts ونقل كافة محتوياته بما فيها الملفات والمجلدات المخفية
-          TARGET_DIR=$(find extracted -name "build.gradle.kts" -exec dirname {} \; | head -n 1)
-          shopt -s dotglob
-          cp -r $TARGET_DIR/* .
+          unzip -o substack-downloader.zip
+          # إذا كان ZIP يحتوي مجلداً رئيسياً واحداً، ننقل كل ما بداخل المجلد للمسار الرئيسي
+          ROOT_DIR=$(find . -maxdepth 2 -name "settings.gradle.kts" -o -name "settings.gradle" | head -n 1)
+          DIR_PATH=$(dirname "$ROOT_DIR")
+          if [ "$DIR_PATH" != "." ]; then
+            rsync -a "$DIR_PATH/" .
+          fi
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -28,7 +30,7 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v3
 
-      - name: Make gradlew executable if present
+      - name: Make gradlew executable
         run: |
           if [ -f "gradlew" ]; then
             chmod +x gradlew
