@@ -25,13 +25,13 @@ jobs:
           mkdir -p app
           echo '{"project_info":{"project_number":"1","project_id":"dummy"},"client":[{"client_info":{"mobilesdk_app_id":"1:1:android:1","android_client_info":{"package_name":"com.dummy"}},"api_key":[{"current_key":"dummy"}],"oauth_client": [],"services": {"appinvite_service": {"other_platform_oauth_client": []}}}]}' > app/google-services.json
 
-      - name: Auto-Patch Kotlin & Compose Versions
+      - name: Clean up incompatible Compose plugin references
         run: |
-          if [ -f "gradle/libs.versions.toml" ]; then
-            sed -i -E 's/(kotlin\s*=\s*")[^"]+"/\11.9.24"/' gradle/libs.versions.toml
-            sed -i -E 's/(ksp\s*=\s*")[^"]+"/\11.9.24-1.0.20"/' gradle/libs.versions.toml
-            sed -i -E 's/(compose[_-]compiler\s*=\s*")[^"]+"/\11.5.14"/' gradle/libs.versions.toml
-          fi
+          # إزالة الإضافة المعطوبة التي تسبب خطأ البحث في المستودعات
+          find . -name "build.gradle.kts" -o -name "build.gradle" | while read file; do
+            sed -i '/kotlin.plugin.compose/d' "$file"
+            sed -i '/compose-compiler/d' "$file"
+          done
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
