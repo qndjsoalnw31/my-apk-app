@@ -11,11 +11,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Unzip project
+      - name: Unzip project with hidden files
         run: |
           unzip substack-downloader.zip -d extracted
-          # البحث عن ملف build.gradle.kts ونقل محتويات المجلد للمسار الرئيسي
+          # البحث عن المجلد الذي يحتوي على build.gradle.kts ونقل كافة محتوياته بما فيها الملفات والمجلدات المخفية
           TARGET_DIR=$(find extracted -name "build.gradle.kts" -exec dirname {} \; | head -n 1)
+          shopt -s dotglob
           cp -r $TARGET_DIR/* .
 
       - name: Set up JDK 17
@@ -27,11 +28,14 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v3
 
-      - name: Generate Gradle Wrapper
-        run: gradle wrapper
-
-      - name: Make gradlew executable
-        run: chmod +x gradlew
+      - name: Make gradlew executable if present
+        run: |
+          if [ -f "gradlew" ]; then
+            chmod +x gradlew
+          else
+            gradle wrapper
+            chmod +x gradlew
+          fi
 
       - name: Build Debug APK
         run: ./gradlew assembleDebug
