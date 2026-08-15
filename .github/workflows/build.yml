@@ -42,7 +42,6 @@ jobs:
 
           sdkmanager \
             "platform-tools" \
-            "platforms;android-37" \
             "platforms;android-36" \
             "platforms;android-35" \
             "platforms;android-34" \
@@ -52,9 +51,7 @@ jobs:
             "build-tools;34.0.0" \
             "build-tools;33.0.2"
 
-          echo ""
-          echo "Installed Android platforms:"
-          sdkmanager --list_installed | grep "platforms;android" || true
+          echo "Android SDK installation completed."
 
       - name: Extract Project
         shell: bash
@@ -122,10 +119,6 @@ jobs:
         run: |
           set -e
 
-          echo "========================================"
-          echo "DETECTING ANDROID GRADLE PLUGIN"
-          echo "========================================"
-
           AGP_VERSION=$(
             grep -RhoE \
               'com\.android\.application[^0-9]*[0-9]+\.[0-9]+(\.[0-9]+)?' \
@@ -153,7 +146,6 @@ jobs:
           fi
 
           if [ -z "$AGP_VERSION" ]; then
-            echo "::warning::AGP version could not be detected."
             AGP_VERSION="9.1.1"
           fi
 
@@ -181,41 +173,7 @@ jobs:
                 ;;
             esac
           else
-            case "$AGP_MAJOR.$AGP_MINOR" in
-              8.13|8.12|8.11)
-                GRADLE_VERSION="8.13"
-                ;;
-              8.10|8.9)
-                GRADLE_VERSION="8.11.1"
-                ;;
-              8.8)
-                GRADLE_VERSION="8.10.2"
-                ;;
-              8.7)
-                GRADLE_VERSION="8.9"
-                ;;
-              8.6|8.5)
-                GRADLE_VERSION="8.7"
-                ;;
-              8.4)
-                GRADLE_VERSION="8.6"
-                ;;
-              8.3)
-                GRADLE_VERSION="8.4"
-                ;;
-              8.2)
-                GRADLE_VERSION="8.2"
-                ;;
-              8.1)
-                GRADLE_VERSION="8.0"
-                ;;
-              8.0)
-                GRADLE_VERSION="8.0"
-                ;;
-              *)
-                GRADLE_VERSION="8.13"
-                ;;
-            esac
+            GRADLE_VERSION="8.13"
           fi
 
           echo "Selected Gradle: $GRADLE_VERSION"
@@ -250,18 +208,15 @@ jobs:
           if [ -f "gradlew" ] && [ -f "gradle/wrapper/gradle-wrapper.jar" ]; then
             chmod +x gradlew
             echo "Existing Gradle Wrapper found."
-            exit 0
+          else
+            echo "Generating Gradle Wrapper..."
+
+            "/tmp/gradle-${GRADLE_VERSION}/bin/gradle" wrapper \
+              --gradle-version "$GRADLE_VERSION" \
+              --distribution-type bin
+
+            chmod +x gradlew
           fi
-
-          echo "Generating Gradle Wrapper..."
-
-          "/tmp/gradle-${GRADLE_VERSION}/bin/gradle" wrapper \
-            --gradle-version "$GRADLE_VERSION" \
-            --distribution-type bin
-
-          chmod +x gradlew
-
-          echo "Gradle Wrapper generated successfully."
 
       - name: Remove Google Services
         shell: bash
@@ -273,7 +228,6 @@ jobs:
           find "$PROJECT_DIR" \
             -type f \
             -name "google-services.json" \
-            -print \
             -delete || true
 
           while IFS= read -r -d '' FILE; do
@@ -295,8 +249,6 @@ jobs:
               -print0
           )
 
-          echo "Google Services cleanup completed."
-
       - name: Remove googleServices Blocks
         shell: bash
         run: |
@@ -312,13 +264,8 @@ jobs:
               "$FILE" || true
 
             sed -i \
-              '/MissingGoogleServicesStrategy/d' \
+              '/googleServices/d' \
               "$FILE" || true
-
-            sed -i \
-              '/missingGoogleServicesStrategy/d' \
-              "$FILE" || true
-
           done < <(
             find "$PROJECT_DIR" \
               -type f \
@@ -330,53 +277,40 @@ jobs:
               -print0
           )
 
-      - name: Force Compile SDK 37
+      - name: Force Compile SDK 36
         shell: bash
         run: |
           set -e
 
-          APP_GRADLE="$PROJECT_DIR/app/build.gradle.kts"
-          APP_GRADLE_GROOVY="$PROJECT_DIR/app/build.gradle"
+          APP_KTS="$PROJECT_DIR/app/build.gradle.kts"
+          APP_GROOVY="$PROJECT_DIR/app/build.gradle"
 
-          echo "========================================"
-          echo "FORCING COMPILE SDK 37"
-          echo "========================================"
-
-          if [ -f "$APP_GRADLE" ]; then
-            echo "Editing Kotlin DSL file:"
-            echo "$APP_GRADLE"
+          if [ -f "$APP_KTS" ]; then
+            sed -i -E \
+              's/compileSdk[[:space:]]*=[[:space:]]*[0-9]+(\.[0-9]+)?/compileSdk = 36/g' \
+              "$APP_KTS" || true
 
             sed -i -E \
-              's/compileSdk[[:space:]]*=[[:space:]]*[0-9]+(\.[0-9]+)?/compileSdk = 37/g' \
-              "$APP_GRADLE" || true
-
-            sed -i -E \
-              's/compileSdk[[:space:]]+[0-9]+(\.[0-9]+)?/compileSdk 37/g' \
-              "$APP_GRADLE" || true
+              's/compileSdk[[:space:]]+[0-9]+(\.[0-9]+)?/compileSdk 36/g' \
+              "$APP_KTS" || true
 
             if ! grep -Eq \
-              'compileSdk[[:space:]]*=[[:space:]]*37|compileSdk[[:space:]]+37' \
-              "$APP_GRADLE"; then
+              'compileSdk[[:space:]]*=[[:space:]]*36|compileSdk[[:space:]]+36' \
+              "$APP_KTS"; then
 
-              echo ""
-              echo "compileSdk was not explicitly found."
-              echo "Injecting compileSdk = 37 into android block."
-
-              sed -i '0,/android[[:space:]]*{/s//android {\n    compileSdk = 37/' "$APP_GRADLE"
+              sed -i \
+                '0,/android[[:space:]]*{/s//android {\n    compileSdk = 36/' \
+                "$APP_KTS"
             fi
           fi
 
-          if [ -f "$APP_GRADLE_GROOVY" ]; then
-            echo "Editing Groovy DSL file:"
-            echo "$APP_GRADLE_GROOVY"
-
+          if [ -f "$APP_GROOVY" ]; then
             sed -i -E \
-              's/compileSdk[[:space:]]+[0-9]+(\.[0-9]+)?/compileSdk 37/g' \
-              "$APP_GRADLE_GROOVY" || true
+              's/compileSdk[[:space:]]+[0-9]+(\.[0-9]+)?/compileSdk 36/g' \
+              "$APP_GROOVY" || true
           fi
 
-          echo ""
-          echo "Current compile SDK configuration:"
+          echo "Final compileSdk configuration:"
 
           grep -RniE \
             'compileSdk' \
@@ -385,22 +319,76 @@ jobs:
             --include='*.gradle.kts' \
             || true
 
-      - name: Force Android Build Tools
+      - name: Pin Compatible Lifecycle Version
         shell: bash
         run: |
           set -e
 
-          APP_GRADLE="$PROJECT_DIR/app/build.gradle.kts"
+          echo "Pinning Lifecycle to 2.10.0 for compileSdk 36 compatibility."
 
-          if [ -f "$APP_GRADLE" ]; then
-            sed -i -E \
-              's/buildToolsVersion[[:space:]]*=[[:space:]]*"[^"]+"/buildToolsVersion = "36.0.0"/g' \
-              "$APP_GRADLE" || true
+          while IFS= read -r -d '' FILE; do
+            sed -i \
+              's/androidx\.lifecycle:lifecycle-viewmodel-ktx:[0-9][0-9.]*/androidx.lifecycle:lifecycle-viewmodel-ktx:2.10.0/g' \
+              "$FILE" || true
 
-            sed -i -E \
-              's/buildToolsVersion[[:space:]]*"[^"]+"/buildToolsVersion "36.0.0"/g' \
-              "$APP_GRADLE" || true
-          fi
+            sed -i \
+              's/androidx\.lifecycle:lifecycle-runtime-compose:[0-9][0-9.]*/androidx.lifecycle:lifecycle-runtime-compose:2.10.0/g' \
+              "$FILE" || true
+
+            sed -i \
+              's/androidx\.lifecycle:lifecycle-viewmodel-compose:[0-9][0-9.]*/androidx.lifecycle:lifecycle-viewmodel-compose:2.10.0/g' \
+              "$FILE" || true
+
+            sed -i \
+              's/lifecycle:[[:space:]]*=[[:space:]]*"2\.11\.0"/lifecycle = "2.10.0"/g' \
+              "$FILE" || true
+
+            sed -i \
+              's/lifecycle_version[[:space:]]*=[[:space:]]*"2\.11\.0"/lifecycle_version = "2.10.0"/g' \
+              "$FILE" || true
+
+          done < <(
+            find "$PROJECT_DIR" \
+              -type f \
+              \( \
+                -name "*.gradle" \
+                -o \
+                -name "*.gradle.kts" \
+                -o \
+                -name "*.toml" \
+              \) \
+              -print0
+          )
+
+      - name: Pin Compatible Activity Version
+        shell: bash
+        run: |
+          set -e
+
+          while IFS= read -r -d '' FILE; do
+            sed -i \
+              's/androidx\.activity:activity-compose:[0-9][0-9.]*/androidx.activity:activity-compose:1.12.0/g' \
+              "$FILE" || true
+
+            sed -i \
+              's/androidx\.activity:activity-ktx:[0-9][0-9.]*/androidx.activity:activity-ktx:1.12.0/g' \
+              "$FILE" || true
+
+            sed -i \
+              's/androidx\.activity:activity:[0-9][0-9.]*/androidx.activity:activity:1.12.0/g' \
+              "$FILE" || true
+          done < <(
+            find "$PROJECT_DIR" \
+              -type f \
+              \( \
+                -name "*.gradle" \
+                -o \
+                -name "*.gradle.kts" \
+                -o \
+                -name "*.toml" \
+              \) \
+              -print0
+          )
 
       - name: Inject Missing Dependencies
         shell: bash
@@ -485,17 +473,17 @@ jobs:
 
           if [ "$NEED_LIFECYCLE" -eq 1 ]; then
             if ! grep -q 'androidx.lifecycle:lifecycle-viewmodel-ktx' "$APP_GRADLE"; then
-              echo 'implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.11.0")' >> "$TEMP_DEPS"
+              echo 'implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.10.0")' >> "$TEMP_DEPS"
             fi
 
             if ! grep -q 'androidx.lifecycle:lifecycle-runtime-compose' "$APP_GRADLE"; then
-              echo 'implementation("androidx.lifecycle:lifecycle-runtime-compose:2.11.0")' >> "$TEMP_DEPS"
+              echo 'implementation("androidx.lifecycle:lifecycle-runtime-compose:2.10.0")' >> "$TEMP_DEPS"
             fi
           fi
 
           if [ "$NEED_ACTIVITY_COMPOSE" -eq 1 ]; then
             if ! grep -q 'androidx.activity:activity-compose' "$APP_GRADLE"; then
-              echo 'implementation("androidx.activity:activity-compose:1.13.0")' >> "$TEMP_DEPS"
+              echo 'implementation("androidx.activity:activity-compose:1.12.0")' >> "$TEMP_DEPS"
             fi
           fi
 
@@ -510,7 +498,7 @@ jobs:
             echo "Injected dependencies:"
             cat "$TEMP_DEPS"
           else
-            echo "No dependency injection required."
+            echo "No missing dependencies detected."
           fi
 
           rm -f "$TEMP_DEPS"
@@ -521,10 +509,6 @@ jobs:
           set -e
 
           cd "$PROJECT_DIR"
-
-          echo "========================================"
-          echo "GENERATING DEBUG KEYSTORE"
-          echo "========================================"
 
           if [ ! -f "debug.keystore" ]; then
             keytool \
@@ -563,7 +547,7 @@ jobs:
             'org.gradle.caching=true' \
             >> "$PROJECT_DIR/gradle.properties"
 
-      - name: Verify Build Configuration
+      - name: Final Configuration Check
         shell: bash
         run: |
           set -e
@@ -571,12 +555,8 @@ jobs:
           cd "$PROJECT_DIR"
 
           echo "========================================"
-          echo "FINAL BUILD CONFIGURATION"
+          echo "FINAL CONFIGURATION"
           echo "========================================"
-
-          echo ""
-          echo "Project:"
-          pwd
 
           echo ""
           echo "Gradle:"
@@ -592,7 +572,27 @@ jobs:
             || true
 
           echo ""
-          echo "Google Services references:"
+          echo "Lifecycle:"
+          grep -RniE \
+            'lifecycle-(runtime-compose|viewmodel-ktx|viewmodel-compose)' \
+            . \
+            --include='*.gradle' \
+            --include='*.gradle.kts' \
+            --include='*.toml' \
+            || true
+
+          echo ""
+          echo "Activity:"
+          grep -RniE \
+            'androidx\.activity' \
+            . \
+            --include='*.gradle' \
+            --include='*.gradle.kts' \
+            --include='*.toml' \
+            || true
+
+          echo ""
+          echo "Google Services:"
           if grep -RniE \
             'google\.services|google-services|com\.google\.gms|MissingGoogleServicesStrategy|missingGoogleServicesStrategy' \
             . \
@@ -600,14 +600,10 @@ jobs:
             --include='*.gradle.kts' \
             --include='*.toml' \
             2>/dev/null; then
-            echo "::warning::Google Services references still exist."
+            echo "::warning::Google Services references remain."
           else
-            echo "None found."
+            echo "None."
           fi
-
-          echo ""
-          echo "Debug keystore:"
-          ls -lh debug.keystore
 
       - name: Validate Gradle
         shell: bash
@@ -668,7 +664,7 @@ jobs:
               || true
 
             echo ""
-            echo "===== COMPILE SDK ERRORS ====="
+            echo "===== SDK / AAR ERRORS ====="
 
             grep -Ei \
               "compileSdk|requires libraries|compile against|AAR metadata|CheckAarMetadata" \
@@ -741,8 +737,6 @@ jobs:
           cp "$APK" \
             "artifacts/Substack-Downloader-debug.apk"
 
-          echo ""
-          echo "Final APK:"
           ls -lh \
             "artifacts/Substack-Downloader-debug.apk"
 
