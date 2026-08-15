@@ -265,17 +265,9 @@ jobs:
           while IFS= read -r -d '' FILE; do
             echo "Cleaning: $FILE"
 
-            sed -i \
-              '/google\.services/d' \
-              "$FILE" || true
-
-            sed -i \
-              '/google-services/d' \
-              "$FILE" || true
-
-            sed -i \
-              '/com\.google\.gms/d' \
-              "$FILE" || true
+            sed -i '/google\.services/d' "$FILE" || true
+            sed -i '/google-services/d' "$FILE" || true
+            sed -i '/com\.google\.gms/d' "$FILE" || true
 
           done < <(
             find "$PROJECT_DIR" \
@@ -290,27 +282,94 @@ jobs:
               -print0
           )
 
-          echo "Google Services cleanup completed."
+          echo "Google Services references cleaned."
 
-      - name: Verify Google Services Removal
+      - name: Remove problematic googleServices block automatically
         shell: bash
         run: |
           set -e
 
           echo "========================================"
-          echo "VERIFYING GOOGLE SERVICES REMOVAL"
+          echo "REMOVING googleServices BLOCKS"
           echo "========================================"
 
+          while IFS= read -r -d '' FILE; do
+            echo "Checking: $FILE"
+
+            sed -i '/googleServices[[:space:]]*{/,/^[[:space:]]*}/d' "$FILE" || true
+            sed -i '/^[[:space:]]*googleServices[[:space:]]*{/d' "$FILE" || true
+            sed -i '/googleServices[[:space:]]*{.*}/d' "$FILE" || true
+            sed -i '/googleServices/d' "$FILE" || true
+            sed -i '/MissingGoogleServicesStrategy/d' "$FILE" || true
+            sed -i '/missingGoogleServicesStrategy/d' "$FILE" || true
+
+          done < <(
+            find "$PROJECT_DIR" \
+              -type f \
+              \( \
+                -name "*.gradle" \
+                -o \
+                -name "*.gradle.kts" \
+              \) \
+              -print0
+          )
+
+          echo "googleServices blocks removed."
+
+      - name: Remove Google Services Plugin References
+        shell: bash
+        run: |
+          set -e
+
+          echo "Cleaning all remaining Google Services plugin references..."
+
+          while IFS= read -r -d '' FILE; do
+            sed -i '/google\.services/d' "$FILE" || true
+            sed -i '/google-services/d' "$FILE" || true
+            sed -i '/com\.google\.gms/d' "$FILE" || true
+          done < <(
+            find "$PROJECT_DIR" \
+              -type f \
+              \( \
+                -name "*.gradle" \
+                -o \
+                -name "*.gradle.kts" \
+                -o \
+                -name "*.toml" \
+              \) \
+              -print0
+          )
+
+          echo "Final Google Services cleanup completed."
+
+      - name: Verify Google Services Cleanup
+        shell: bash
+        run: |
+          set -e
+
+          echo "========================================"
+          echo "VERIFYING GOOGLE SERVICES CLEANUP"
+          echo "========================================"
+
+          FOUND=0
+
           if grep -RniE \
-            'google\.services|google-services|com\.google\.gms' \
+            'google\.services|google-services|com\.google\.gms|MissingGoogleServicesStrategy|missingGoogleServicesStrategy' \
             "$PROJECT_DIR" \
             --include='*.gradle' \
             --include='*.gradle.kts' \
             --include='*.toml' \
-            2>/dev/null; then
+            >/tmp/google-services-check.txt 2>/dev/null; then
 
-            echo "::warning::Google Services references still exist."
+            FOUND=1
 
+            echo "Remaining references:"
+            cat /tmp/google-services-check.txt
+
+          fi
+
+          if [ "$FOUND" -eq 1 ]; then
+            echo "::warning::Some Google Services references still exist."
           else
             echo "No Google Services references remain."
           fi
@@ -451,7 +510,11 @@ jobs:
           ls -lh debug.keystore
 
           echo ""
-          echo "Starting Gradle..."
+          echo "Gradle:"
+          ./gradlew --version
+
+          echo ""
+          echo "Starting build..."
 
           ./gradlew assembleDebug \
             --no-daemon \
@@ -485,7 +548,7 @@ jobs:
             echo "----- Google Services errors -----"
 
             grep -Ei \
-              "google-services|google services|google\.services|google-services\.json" \
+              "google-services|google services|google\.services|google-services\.json|MissingGoogleServicesStrategy|missingGoogleServicesStrategy" \
               "$GITHUB_WORKSPACE/gradle-build.log" \
               | tail -100 || true
 
@@ -517,7 +580,7 @@ jobs:
           echo "APK BUILD SUCCESSFUL"
           echo "========================================"
 
-      - name: Find APK
+      - name: Locate APK
         shell: bash
         run: |
           set -e
