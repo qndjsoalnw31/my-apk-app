@@ -7,29 +7,23 @@ on:
       - main
       - master
 
-permissions:
-  contents: read
-
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Java
-        uses: actions/setup-java@v4
+      - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      - name: Setup Android
-        uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@v3
 
       - name: Install SDK
         run: |
-          yes | sdkmanager --licenses || true
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
           sdkmanager "platform-tools"
           sdkmanager "platforms;android-35"
           sdkmanager "platforms;android-34"
@@ -41,215 +35,128 @@ jobs:
       - name: Extract ZIP
         run: |
           set -e
-
           test -f substack-downloader.zip
-
           rm -rf extracted
-          mkdir extracted
-
+          mkdir -p extracted
           unzip -q substack-downloader.zip -d extracted
 
-          echo "ZIP extracted."
-
-      - name: Find Android Project
+      - name: Find Project
         run: |
           set -e
 
-          GRADLEW=$(find extracted -type f -name gradlew | head -1)
+          PROJECT=$(find extracted -type f -name settings.gradle.kts -print -quit)
 
-          if [ -z "$GRADLEW" ]; then
-            echo "ERROR: gradlew not found."
-            find extracted -maxdepth 6 -type f
+          if [ -z "$PROJECT" ]; then
+            PROJECT=$(find extracted -type f -name settings.gradle -print -quit)
+          fi
+
+          if [ -z "$PROJECT" ]; then
+            echo "ERROR: Gradle project not found"
+            find extracted -maxdepth 5 -type f -print
             exit 1
           fi
 
-          PROJECT=$(dirname "$GRADLEW")
+          PROJECT_DIR=$(dirname "$PROJECT")
 
-          echo "Project found:"
-          echo "$PROJECT"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          if [ ! -f "$PROJECT/settings.gradle" ] && [ ! -f "$PROJECT/settings.gradle.kts" ]; then
-            echo "ERROR: settings.gradle not found."
-            exit 1
-          fi
+          echo "Project:"
+          echo "$PROJECT_DIR"
 
-          echo "PROJECT=$PROJECT" >> "$GITHUB_ENV"
-
-      - name: Move Project To Root
+      - name: Create Gradle Wrapper
         run: |
           set -e
 
-          mkdir project-root
+          cd "$PROJECT_DIR"
 
-          cp -a "$PROJECT"/. project-root/
+          if [ -f gradlew ]; then
+            chmod +x gradlew
+            exit 0
+          fi
 
-          shopt -s dotglob nullglob
+          echo "gradlew not found."
+          echo "Creating Gradle wrapper."
 
-          for FILE in project-root/*; do
-            NAME=$(basename "$FILE")
+          mkdir -p gradle/wrapper
 
-            if [ "$NAME" = ".git" ]; then
-              continue
-            fi
+          wget -q https://services.gradle.org/distributions/gradle-8.13-bin.zip -O /tmp/gradle.zip
 
-            rm -rf "$NAME"
-            cp -a "$FILE" .
-          done
+          rm -rf /tmp/gradle
+          mkdir /tmp/gradle
 
-          rm -rf project-root
+          unzip -q /tmp/gradle.zip -d /tmp/gradle
 
-          echo "Project moved to root."
+          /tmp/gradle/gradle-8.13/bin/gradle wrapper --gradle-version 8.13
+
+          chmod +x gradlew
 
       - name: Verify Project
         run: |
           set -e
 
-          echo "Current directory:"
-          pwd
+          cd "$PROJECT_DIR"
 
-          echo ""
-          echo "Files:"
-          ls -la
-
-          echo ""
-
-          if [ ! -f gradlew ]; then
-            echo "ERROR: gradlew not found."
-            exit 1
-          fi
-
-          if [ ! -f settings.gradle ] && [ ! -f settings.gradle.kts ]; then
-            echo "ERROR: settings.gradle not found."
-            exit 1
-          fi
+          test -f settings.gradle.kts || test -f settings.gradle
+          test -f gradlew
 
           chmod +x gradlew
 
-          echo "Gradle wrapper found."
-
-      - name: Remove Google Services
-        run: |
-          find . \
-            -type f \
-            -name google-services.json \
-            -not -path "./.git/*" \
-            -delete || true
-
-      - name: Remove Google Services Plugin
-        run: |
-          find . \
-            -type f \
-            \( \
-              -name build.gradle \
-              -o \
-              -name build.gradle.kts \
-            \) \
-            -print0 |
-          while IFS= read -r -d '' FILE; do
-            sed -i '/com\.google\.gms\.google-services/d' "$FILE" || true
-            sed -i '/com\.google\.gms:google-services/d' "$FILE" || true
-          done
-
-      - name: Configure Gradle
-        run: |
-          touch gradle.properties
-
-          sed -i \
-            '/^[[:space:]]*org\.gradle\.jvmargs[[:space:]]*=/d' \
-            gradle.properties || true
-
-          printf '%s\n' \
-            'org.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8' \
-            'org.gradle.daemon=false' \
-            'org.gradle.parallel=true' \
-            'org.gradle.caching=true' \
-            >> gradle.properties
-
-      - name: Check Gradle
-        run: |
-          chmod +x gradlew
+          echo "Java:"
           java -version
+
+          echo ""
+          echo "Gradle:"
           ./gradlew --version
-
-      - name: Validate Gradle
-        run: |
-          ./gradlew help \
-            --no-daemon \
-            --stacktrace
-
-      - name: Clean
-        run: |
-          ./gradlew clean \
-            --no-daemon \
-            --stacktrace
 
       - name: Build APK
         run: |
           set -o pipefail
 
+          cd "$PROJECT_DIR"
+
           ./gradlew assembleDebug \
             --no-daemon \
             --stacktrace \
-            --warning-mode all \
-            2>&1 | tee gradle-build.log
+            2>&1 | tee "$GITHUB_WORKSPACE/build.log"
 
           CODE=${PIPESTATUS[0]}
 
           if [ "$CODE" -ne 0 ]; then
             echo ""
             echo "BUILD FAILED"
-            echo ""
-
-            grep -A 30 -B 5 \
-              "\* What went wrong" \
-              gradle-build.log || true
-
-            echo ""
-            tail -100 gradle-build.log
-
+            tail -150 "$GITHUB_WORKSPACE/build.log"
             exit "$CODE"
           fi
-
-          echo ""
-          echo "BUILD SUCCESSFUL"
 
       - name: Find APK
         run: |
           set -e
 
-          APK=$(find . \
+          APK=$(find "$PROJECT_DIR" \
             -type f \
             -name "*.apk" \
             -path "*/build/outputs/apk/*" \
-            -not -path "./.gradle/*" \
-            | head -1)
+            -print -quit)
 
           if [ -z "$APK" ]; then
-            echo "ERROR: APK not found."
-            find . -type f -name "*.apk"
+            echo "ERROR: APK not found"
             exit 1
           fi
 
-          echo "APK:"
-          echo "$APK"
-
           mkdir -p artifacts
-
           cp "$APK" artifacts/Substack-Downloader-debug.apk
 
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
+          echo "APK:"
+          ls -lh artifacts/Substack-Downloader-debug.apk
+
+      - uses: actions/upload-artifact@v4
         with:
           name: Substack-Downloader-APK
           path: artifacts/Substack-Downloader-debug.apk
-          if-no-files-found: error
-          retention-days: 7
 
-      - name: Upload Build Log
+      - uses: actions/upload-artifact@v4
         if: failure()
-        uses: actions/upload-artifact@v4
         with:
-          name: Gradle-Build-Log
-          path: gradle-build.log
+          name: Build-Log
+          path: build.log
           if-no-files-found: ignore
-          retention-days: 7
