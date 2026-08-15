@@ -10,44 +10,89 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: android-apk-build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
-    name: Build APK
+    name: Build Android APK
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      GRADLE_OPTS: >-
+        -Dorg.gradle.jvmargs=-Xmx3g
+        -XX:MaxMetaspaceSize=768m
+        -Dfile.encoding=UTF-8
+      CI: "true"
 
     steps:
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Extract project ZIP
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK
+        shell: bash
+        run: |
+          set -e
+
+          yes | sdkmanager --licenses >/dev/null || true
+
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-35" \
+            "platforms;android-34" \
+            "platforms;android-33" \
+            "build-tools;35.0.0" \
+            "build-tools;34.0.0" \
+            "build-tools;33.0.2"
+
+      - name: Extract Android Project
         shell: bash
         run: |
           set -e
 
           if [ ! -f "substack-downloader.zip" ]; then
-            echo "ERROR: substack-downloader.zip not found"
+            echo "::error::substack-downloader.zip not found."
             exit 1
           fi
 
           rm -rf extracted
           mkdir -p extracted
 
-          unzip -o "substack-downloader.zip" -d extracted
+          unzip -oq "substack-downloader.zip" -d extracted
 
-          echo "ZIP extracted successfully"
+          echo "ZIP extracted successfully."
 
-      - name: Find Android project
+      - name: Locate Android Project
         shell: bash
         run: |
           set -e
 
-          SETTINGS_FILE=$(find extracted \
-            -type f \
-            \( -name "settings.gradle" -o -name "settings.gradle.kts" \) \
-            -print -quit)
+          SETTINGS_FILE=$(
+            find extracted \
+              -type f \
+              \( \
+                -name "settings.gradle" \
+                -o \
+                -name "settings.gradle.kts" \
+              \) \
+              -print -quit
+          )
 
           if [ -z "$SETTINGS_FILE" ]; then
-            echo "ERROR: Android Gradle project not found"
+            echo "::error::settings.gradle or settings.gradle.kts not found."
+            find extracted -maxdepth 5 -type f | head -300
             exit 1
           fi
 
@@ -56,18 +101,73 @@ jobs:
           echo "Android project:"
           echo "$PROJECT_DIR"
 
-          shopt -s dotglob
-          cp -R "$PROJECT_DIR"/* .
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo "Project copied successfully"
-
-      - name: Show project structure
+      - name: Copy Android Project
         shell: bash
         run: |
-          echo "===== PROJECT ====="
-          find . -maxdepth 3 -type f | sort | head -300
+          set -e
 
-      - name: Remove invalid Google Services configuration
+          rm -rf android-project
+          mkdir -p android-project
+
+          cp -a "$PROJECT_DIR"/. android-project/
+
+          shopt -s dotglob nullglob
+
+          for item in android-project/*; do
+            name="$(basename "$item")"
+
+            if [ "$name" = ".git" ]; then
+              continue
+            fi
+
+            rm -rf "$name"
+            cp -a "$item" .
+          done
+
+          echo "Project copied successfully."
+
+      - name: Verify Project
+        shell: bash
+        run: |
+          set -e
+
+          if [ ! -f "settings.gradle" ] &&
+             [ ! -f "settings.gradle.kts" ]; then
+            echo "::error::Gradle settings file missing."
+            exit 1
+          fi
+
+          if [ ! -f "gradlew" ]; then
+            echo "::error::gradlew not found."
+            exit 1
+          fi
+
+          chmod +x gradlew
+
+          echo "Project files:"
+          ls -la
+
+          echo ""
+          echo "Gradle files:"
+          find . \
+            -maxdepth 5 \
+            -type f \
+            \( \
+              -name "settings.gradle" \
+              -o \
+              -name "settings.gradle.kts" \
+              -o \
+              -name "build.gradle" \
+              -o \
+              -name "build.gradle.kts" \
+              -o \
+              -name "gradle.properties" \
+            \) \
+            -print
+
+      - name: Remove Invalid Google Services
         shell: bash
         run: |
           set -e
@@ -75,86 +175,95 @@ jobs:
           find . \
             -type f \
             -name "google-services.json" \
-            -delete
+            -not -path "./.git/*" \
+            -print \
+            -delete || true
 
-          echo "Invalid Google Services files removed"
-
-      - name: Remove Google Services plugin
+      - name: Remove Google Services Plugin
         shell: bash
         run: |
           set -e
 
-          find . \
-            -type f \
-            \( -name "build.gradle" -o -name "build.gradle.kts" \) \
-            -print0 |
           while IFS= read -r -d '' file; do
-
-            echo "Checking: $file"
 
             sed -i \
               '/com\.google\.gms\.google-services/d' \
               "$file" || true
 
             sed -i \
-              '/google-services/d' \
+              '/com\.google\.gms:google-services/d' \
               "$file" || true
 
-          done
+          done < <(
+            find . \
+              -type f \
+              \( \
+                -name "build.gradle" \
+                -o \
+                -name "build.gradle.kts" \
+              \) \
+              -print0
+          )
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-          cache: gradle
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-
-      - name: Prepare Gradle wrapper
+      - name: Configure Gradle
         shell: bash
         run: |
           set -e
 
-          if [ ! -f "./gradlew" ]; then
-            echo "Gradle wrapper missing"
+          touch gradle.properties
 
-            if command -v gradle >/dev/null 2>&1; then
-              gradle wrapper
-            else
-              echo "ERROR: gradlew is missing and Gradle is unavailable"
-              exit 1
-            fi
-          fi
+          sed -i \
+            '/^[[:space:]]*org\.gradle\.jvmargs[[:space:]]*=/d' \
+            gradle.properties || true
 
-          chmod +x ./gradlew
+          cat >> gradle.properties <<'EOF'
 
-          echo "Gradle version:"
+          org.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8
+          org.gradle.daemon=false
+          org.gradle.parallel=true
+          org.gradle.caching=true
+          EOF
+
+          echo "Gradle configuration:"
+          cat gradle.properties
+
+      - name: Show Java And Gradle
+        shell: bash
+        run: |
+          set -e
+
+          java -version
+
+          echo ""
+
+          chmod +x gradlew
+
           ./gradlew --version
 
-      - name: Clean project
+      - name: Validate Gradle
+        shell: bash
+        run: |
+          set -e
+
+          ./gradlew help \
+            --no-daemon \
+            --stacktrace \
+            --warning-mode all
+
+      - name: Clean Project
         shell: bash
         run: |
           set -e
 
           ./gradlew clean \
             --no-daemon \
-            --stacktrace
-
-      - name: Check Gradle projects
-        shell: bash
-        run: |
-          set -e
-
-          ./gradlew projects \
-            --no-daemon \
-            --stacktrace
+            --stacktrace \
+            --warning-mode all
 
       - name: Build Debug APK
         shell: bash
         run: |
-          set +e
+          set -o pipefail
 
           echo "========================================"
           echo "BUILDING APK"
@@ -163,41 +272,37 @@ jobs:
           ./gradlew assembleDebug \
             --no-daemon \
             --stacktrace \
-            --info \
             --warning-mode all \
             2>&1 | tee gradle-build.log
 
           EXIT_CODE=${PIPESTATUS[0]}
 
-          echo ""
-          echo "========================================"
-          echo "BUILD RESULT"
-          echo "EXIT CODE: $EXIT_CODE"
-          echo "========================================"
-
           if [ "$EXIT_CODE" -ne 0 ]; then
 
             echo ""
-            echo "===== WHAT WENT WRONG ====="
-            grep -A 20 -B 5 \
+            echo "========================================"
+            echo "BUILD FAILED"
+            echo "========================================"
+
+            echo ""
+            echo "----- What went wrong -----"
+
+            grep -A 30 -B 5 \
               "\* What went wrong" \
               gradle-build.log || true
 
             echo ""
-            echo "===== CAUSED BY ====="
-            grep -A 20 -B 5 \
-              "Caused by:" \
-              gradle-build.log | head -120 || true
+            echo "----- Failed tasks -----"
 
-            echo ""
-            echo "===== FAILED TASK ====="
             grep -E \
               "Execution failed for task|FAILED|FAILURE" \
-              gradle-build.log | head -100 || true
+              gradle-build.log \
+              | tail -100 || true
 
             echo ""
-            echo "===== LAST 150 LINES ====="
-            tail -150 gradle-build.log
+            echo "----- Last 200 lines -----"
+
+            tail -200 gradle-build.log
 
             exit "$EXIT_CODE"
           fi
@@ -207,33 +312,48 @@ jobs:
           echo "APK BUILD SUCCESSFUL"
           echo "========================================"
 
-      - name: Find generated APK
+      - name: Locate APK
         shell: bash
         run: |
           set -e
 
-          echo "Searching for APK..."
-
-          find . \
+          APK=$(find . \
             -type f \
-            -path "*/build/outputs/apk/debug/*.apk" \
-            -print
+            -name "*.apk" \
+            -path "*/build/outputs/apk/*" \
+            -not -path "./.gradle/*" \
+            -print \
+            | head -1)
 
-          APK_COUNT=$(find . \
-            -type f \
-            -path "*/build/outputs/apk/debug/*.apk" \
-            | wc -l)
-
-          if [ "$APK_COUNT" -eq 0 ]; then
-            echo "ERROR: No APK was generated"
+          if [ -z "$APK" ]; then
+            echo "::error::APK was not generated."
             exit 1
           fi
+
+          echo "APK found:"
+          echo "$APK"
+
+          mkdir -p artifacts
+
+          cp "$APK" \
+            "artifacts/Substack-Downloader-debug.apk"
+
+          ls -lh \
+            "artifacts/Substack-Downloader-debug.apk"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: Substack-Downloader-APK
-          path: |
-            **/build/outputs/apk/debug/*.apk
+          path: artifacts/Substack-Downloader-debug.apk
           if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload Build Log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Gradle-Build-Log
+          path: gradle-build.log
+          if-no-files-found: ignore
           retention-days: 7
