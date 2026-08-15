@@ -131,19 +131,16 @@ jobs:
           fi
 
           if [ -z "$AGP_VERSION" ]; then
-            echo "::warning::Could not detect AGP version."
-            echo "Using AGP 9.1 compatible Gradle 9.3.1."
+            echo "::warning::AGP version could not be detected."
+            echo "Using Gradle 9.3.1."
             AGP_VERSION="9.1"
           fi
 
-          echo "Detected AGP version:"
+          echo "Detected AGP:"
           echo "$AGP_VERSION"
 
           AGP_MAJOR=$(echo "$AGP_VERSION" | cut -d. -f1)
           AGP_MINOR=$(echo "$AGP_VERSION" | cut -d. -f2)
-
-          echo "AGP major: $AGP_MAJOR"
-          echo "AGP minor: $AGP_MINOR"
 
           GRADLE_VERSION="9.3.1"
 
@@ -203,8 +200,7 @@ jobs:
             esac
           fi
 
-          echo ""
-          echo "Selected Gradle version:"
+          echo "Selected Gradle:"
           echo "$GRADLE_VERSION"
 
           echo "AGP_VERSION=$AGP_VERSION" >> "$GITHUB_ENV"
@@ -214,8 +210,6 @@ jobs:
         shell: bash
         run: |
           set -e
-
-          echo "Downloading Gradle $GRADLE_VERSION..."
 
           cd /tmp
 
@@ -227,7 +221,6 @@ jobs:
 
           unzip -q gradle.zip
 
-          echo ""
           echo "Gradle installed:"
           "/tmp/gradle-${GRADLE_VERSION}/bin/gradle" --version
 
@@ -238,23 +231,14 @@ jobs:
 
           cd "$PROJECT_DIR"
 
-          echo "========================================"
-          echo "GENERATING GRADLE WRAPPER"
-          echo "========================================"
-
           if [ -f "gradlew" ] && [ -f "gradle/wrapper/gradle-wrapper.jar" ]; then
             echo "Existing Gradle Wrapper found."
-
             chmod +x gradlew
-
-            echo "Using existing wrapper."
             exit 0
           fi
 
           echo "Gradle Wrapper not found."
-          echo "Creating wrapper..."
-
-          mkdir -p gradle/wrapper
+          echo "Generating Gradle Wrapper $GRADLE_VERSION..."
 
           "/tmp/gradle-${GRADLE_VERSION}/bin/gradle" wrapper \
             --gradle-version "$GRADLE_VERSION" \
@@ -262,71 +246,31 @@ jobs:
 
           chmod +x gradlew
 
-          echo ""
-          echo "Gradle Wrapper created successfully."
-
-      - name: Verify Gradle Wrapper
-        shell: bash
-        run: |
-          set -e
-
-          cd "$PROJECT_DIR"
-
-          echo "========================================"
-          echo "VERIFYING GRADLE WRAPPER"
-          echo "========================================"
-
-          if [ ! -f "gradlew" ]; then
-            echo "::error::gradlew not found"
-            exit 1
-          fi
-
-          if [ ! -f "gradle/wrapper/gradle-wrapper.jar" ]; then
-            echo "::error::gradle-wrapper.jar not found"
-            exit 1
-          fi
-
-          if [ ! -f "gradle/wrapper/gradle-wrapper.properties" ]; then
-            echo "::error::gradle-wrapper.properties not found"
-            exit 1
-          fi
-
-          chmod +x gradlew
-
-          echo ""
-          echo "Gradle Wrapper files:"
-          find gradle/wrapper -maxdepth 1 -type f -print
-
-          echo ""
-          echo "Gradle version:"
-          ./gradlew --version
+          echo "Gradle Wrapper generated successfully."
 
       - name: Remove Google Services
         shell: bash
         run: |
           set -e
 
+          echo "Removing google-services.json files..."
+
           find "$PROJECT_DIR" \
             -type f \
             -name "google-services.json" \
+            -print \
             -delete || true
-
-          echo "Google Services JSON cleanup completed."
 
       - name: Remove Google Services Plugin
         shell: bash
         run: |
           set -e
 
-          find "$PROJECT_DIR" \
-            -type f \
-            \( \
-              -name "build.gradle" \
-              -o \
-              -name "build.gradle.kts" \
-            \) \
-            -print0 |
+          echo "Removing Google Services plugin references..."
+
           while IFS= read -r -d '' FILE; do
+            echo "Checking: $FILE"
+
             sed -i \
               '/com\.google\.gms\.google-services/d' \
               "$FILE" || true
@@ -334,7 +278,109 @@ jobs:
             sed -i \
               '/com\.google\.gms:google-services/d' \
               "$FILE" || true
-          done
+
+            sed -i \
+              '/google-services/d' \
+              "$FILE" || true
+
+          done < <(
+            find "$PROJECT_DIR" \
+              -type f \
+              \( \
+                -name "*.gradle" \
+                -o \
+                -name "*.gradle.kts" \
+                -o \
+                -name "*.toml" \
+              \) \
+              -print0
+          )
+
+          echo "Google Services cleanup completed."
+
+      - name: Generate Debug Keystore
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          echo "========================================"
+          echo "GENERATING DEBUG KEYSTORE"
+          echo "========================================"
+
+          if [ -f "debug.keystore" ]; then
+            echo "Existing debug.keystore found."
+          else
+            echo "Generating debug.keystore..."
+
+            keytool \
+              -genkeypair \
+              -v \
+              -keystore "debug.keystore" \
+              -storepass "android" \
+              -alias "androiddebugkey" \
+              -keypass "android" \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+          echo ""
+          echo "Keystore path:"
+          realpath "debug.keystore"
+
+          echo ""
+          echo "Checking keystore..."
+
+          keytool \
+            -list \
+            -keystore "debug.keystore" \
+            -storepass "android"
+
+          echo ""
+          echo "Keystore ready."
+
+      - name: Verify Project
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          echo "========================================"
+          echo "VERIFYING PROJECT"
+          echo "========================================"
+
+          if [ ! -f "gradlew" ]; then
+            echo "::error::gradlew not found"
+            exit 1
+          fi
+
+          if [ ! -f "settings.gradle.kts" ] && [ ! -f "settings.gradle" ]; then
+            echo "::error::settings.gradle not found"
+            exit 1
+          fi
+
+          if [ ! -f "debug.keystore" ]; then
+            echo "::error::debug.keystore not found"
+            exit 1
+          fi
+
+          chmod +x gradlew
+
+          echo ""
+          echo "Project directory:"
+          pwd
+
+          echo ""
+          echo "Gradle:"
+          ./gradlew --version
+
+          echo ""
+          echo "Keystore:"
+          realpath debug.keystore
 
       - name: Configure Gradle
         shell: bash
@@ -353,9 +399,6 @@ jobs:
             'org.gradle.parallel=true' \
             'org.gradle.caching=true' \
             >> "$PROJECT_DIR/gradle.properties"
-
-          echo "Gradle configuration:"
-          cat "$PROJECT_DIR/gradle.properties"
 
       - name: Validate Gradle
         shell: bash
@@ -381,6 +424,20 @@ jobs:
             --stacktrace \
             --warning-mode all
 
+      - name: Verify Google Services Task
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          if ./gradlew tasks --all --no-daemon | grep -q "processDebugGoogleServices"; then
+            echo "WARNING: Google Services task is still active."
+            echo "The project may still use Firebase."
+          else
+            echo "Google Services task is not active."
+          fi
+
       - name: Build Debug APK
         shell: bash
         run: |
@@ -391,6 +448,13 @@ jobs:
           echo "========================================"
           echo "BUILDING DEBUG APK"
           echo "========================================"
+
+          echo ""
+          echo "Keystore before build:"
+          ls -lh debug.keystore
+
+          echo ""
+          echo "Starting Gradle..."
 
           ./gradlew assembleDebug \
             --no-daemon \
@@ -420,18 +484,18 @@ jobs:
               "$GITHUB_WORKSPACE/gradle-build.log" || true
 
             echo ""
-            echo "----- Failed tasks -----"
+            echo "----- Signing errors -----"
 
-            grep -E \
-              "Execution failed for task|FAILED|FAILURE" \
+            grep -Ei \
+              "keystore|signingConfig|validateSigning" \
               "$GITHUB_WORKSPACE/gradle-build.log" \
               | tail -100 || true
 
             echo ""
-            echo "----- Gradle / AGP errors -----"
+            echo "----- Google Services errors -----"
 
             grep -Ei \
-              "minimum supported Gradle|requires Gradle|Android Gradle Plugin|plugin" \
+              "google-services|google services|google-services.json" \
               "$GITHUB_WORKSPACE/gradle-build.log" \
               | tail -100 || true
 
@@ -453,8 +517,6 @@ jobs:
         run: |
           set -e
 
-          echo "Searching for APK..."
-
           APK=$(
             find "$PROJECT_DIR" \
               -type f \
@@ -468,7 +530,8 @@ jobs:
             echo "::error::APK was not generated."
 
             echo ""
-            echo "All APK files:"
+            echo "Searching all APK files:"
+
             find "$PROJECT_DIR" \
               -type f \
               -name "*.apk" \
@@ -477,7 +540,6 @@ jobs:
             exit 1
           fi
 
-          echo ""
           echo "APK found:"
           echo "$APK"
 
