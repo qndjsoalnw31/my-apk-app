@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - master
+
   workflow_dispatch:
 
 permissions:
@@ -29,22 +30,37 @@ jobs:
 
     steps:
 
+      # ==========================================================
+      # 1. Checkout repository
+      # ==========================================================
       - name: Checkout repository
         uses: actions/checkout@v4
 
+
+      # ==========================================================
+      # 2. Setup JDK 17
+      # ==========================================================
       - name: Setup JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
+
+      # ==========================================================
+      # 3. Setup Android SDK
+      # ==========================================================
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
+
+      # ==========================================================
+      # 4. Install Android SDK
+      # ==========================================================
       - name: Install Android SDK
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           yes | sdkmanager --licenses >/dev/null || true
 
@@ -57,81 +73,166 @@ jobs:
             "build-tools;34.0.0" \
             "build-tools;33.0.2"
 
+
+      # ==========================================================
+      # 5. Extract Android Project directly into repository root
+      # ==========================================================
       - name: Extract Android Project
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
+
+          echo "========================================"
+          echo "EXTRACTING ANDROID PROJECT"
+          echo "========================================"
 
           if [ ! -f "substack-downloader.zip" ]; then
             echo "::error::substack-downloader.zip not found."
             exit 1
           fi
 
-          rm -rf extracted
-          mkdir -p extracted
+          echo "ZIP file found:"
+          ls -lh "substack-downloader.zip"
 
-          unzip -oq "substack-downloader.zip" -d extracted
+          echo ""
+          echo "ZIP contents:"
+          unzip -l "substack-downloader.zip" | head -100
 
+          echo ""
+          echo "Extracting ZIP directly into repository root..."
+
+          unzip -o "substack-downloader.zip"
+
+          echo ""
           echo "ZIP extracted successfully."
 
-      - name: Locate Android Project
-        shell: bash
-        run: |
-          set -e
+          echo ""
+          echo "Repository contents after extraction:"
+          ls -la
+
+          echo ""
+          echo "Searching for Gradle project..."
 
           SETTINGS_FILE=$(
-            find extracted \
+            find . \
               -type f \
               \( \
                 -name "settings.gradle" \
                 -o \
                 -name "settings.gradle.kts" \
               \) \
+              -not -path "./.git/*" \
+              -not -path "./.gradle/*" \
               -print -quit
           )
 
           if [ -z "$SETTINGS_FILE" ]; then
-            echo "::error::settings.gradle or settings.gradle.kts not found."
-            find extracted -maxdepth 5 -type f | head -300
+            echo "::error::No settings.gradle or settings.gradle.kts found after extraction."
+
+            echo ""
+            echo "Extracted files:"
+
+            find . \
+              -maxdepth 5 \
+              -type f \
+              -not -path "./.git/*" \
+              -print \
+              | head -300
+
             exit 1
           fi
 
-          PROJECT_DIR=$(dirname "$SETTINGS_FILE")
+          PROJECT_DIR="$(dirname "$SETTINGS_FILE")"
 
-          echo "Android project:"
+          echo ""
+          echo "Android project detected:"
           echo "$PROJECT_DIR"
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-      - name: Copy Android Project
+
+      # ==========================================================
+      # 6. Move nested project to repository root if necessary
+      # ==========================================================
+      - name: Normalize Android Project Root
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          rm -rf android-project
-          mkdir -p android-project
+          SETTINGS_FILE=$(
+            find . \
+              -type f \
+              \( \
+                -name "settings.gradle" \
+                -o \
+                -name "settings.gradle.kts" \
+              \) \
+              -not -path "./.git/*" \
+              -not -path "./.gradle/*" \
+              -print -quit
+          )
 
-          cp -a "$PROJECT_DIR"/. android-project/
+          if [ -z "$SETTINGS_FILE" ]; then
+            echo "::error::Gradle settings file not found."
+            exit 1
+          fi
 
-          shopt -s dotglob nullglob
+          PROJECT_DIR="$(dirname "$SETTINGS_FILE")"
 
-          for item in android-project/*; do
-            name="$(basename "$item")"
+          echo "Detected project directory:"
+          echo "$PROJECT_DIR"
 
-            if [ "$name" = ".git" ]; then
-              continue
-            fi
+          if [ "$PROJECT_DIR" != "." ]; then
 
-            rm -rf "$name"
-            cp -a "$item" .
-          done
+            echo ""
+            echo "Project is inside a subdirectory."
+            echo "Moving project contents to repository root..."
 
-          echo "Project copied successfully."
+            TEMP_DIR="$(mktemp -d)"
 
+            shopt -s dotglob nullglob
+
+            cp -a "$PROJECT_DIR"/. "$TEMP_DIR"/
+
+            for item in "$TEMP_DIR"/*; do
+              name="$(basename "$item")"
+
+              if [ "$name" = ".git" ]; then
+                continue
+              fi
+
+              rm -rf "$name"
+              cp -a "$item" .
+            done
+
+            rm -rf "$TEMP_DIR"
+
+            echo ""
+            echo "Project normalized to repository root."
+
+          else
+
+            echo ""
+            echo "Project is already in repository root."
+
+          fi
+
+          echo ""
+          echo "Final project root:"
+          ls -la
+
+
+      # ==========================================================
+      # 7. Verify project
+      # ==========================================================
       - name: Verify Project
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
+
+          echo "========================================"
+          echo "VERIFYING ANDROID PROJECT"
+          echo "========================================"
 
           if [ ! -f "settings.gradle" ] &&
              [ ! -f "settings.gradle.kts" ]; then
@@ -146,11 +247,13 @@ jobs:
 
           chmod +x gradlew
 
+          echo ""
           echo "Project files:"
           ls -la
 
           echo ""
           echo "Gradle files:"
+
           find . \
             -maxdepth 5 \
             -type f \
@@ -167,10 +270,16 @@ jobs:
             \) \
             -print
 
+
+      # ==========================================================
+      # 8. Remove invalid Google Services
+      # ==========================================================
       - name: Remove Invalid Google Services
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
+
+          echo "Removing google-services.json files..."
 
           find . \
             -type f \
@@ -179,12 +288,21 @@ jobs:
             -print \
             -delete || true
 
+          echo "Google Services JSON cleanup completed."
+
+
+      # ==========================================================
+      # 9. Remove Google Services Plugin
+      # ==========================================================
       - name: Remove Google Services Plugin
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           while IFS= read -r -d '' file; do
+
+            echo "Checking:"
+            echo "$file"
 
             sed -i \
               '/com\.google\.gms\.google-services/d' \
@@ -205,10 +323,14 @@ jobs:
               -print0
           )
 
+
+      # ==========================================================
+      # 10. Configure Gradle
+      # ==========================================================
       - name: Configure Gradle
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           touch gradle.properties
 
@@ -227,39 +349,57 @@ jobs:
           echo "Gradle configuration:"
           cat gradle.properties
 
+
+      # ==========================================================
+      # 11. Show Java and Gradle
+      # ==========================================================
       - name: Show Java And Gradle
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
+          echo "Java version:"
           java -version
 
           echo ""
+          echo "Gradle version:"
 
           chmod +x gradlew
 
           ./gradlew --version
 
+
+      # ==========================================================
+      # 12. Validate Gradle
+      # ==========================================================
       - name: Validate Gradle
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           ./gradlew help \
             --no-daemon \
             --stacktrace \
             --warning-mode all
 
+
+      # ==========================================================
+      # 13. Clean project
+      # ==========================================================
       - name: Clean Project
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           ./gradlew clean \
             --no-daemon \
             --stacktrace \
             --warning-mode all
 
+
+      # ==========================================================
+      # 14. Build Debug APK
+      # ==========================================================
       - name: Build Debug APK
         shell: bash
         run: |
@@ -276,6 +416,12 @@ jobs:
             2>&1 | tee gradle-build.log
 
           EXIT_CODE=${PIPESTATUS[0]}
+
+          echo ""
+          echo "========================================"
+          echo "BUILD RESULT"
+          echo "EXIT CODE: $EXIT_CODE"
+          echo "========================================"
 
           if [ "$EXIT_CODE" -ne 0 ]; then
 
@@ -300,6 +446,14 @@ jobs:
               | tail -100 || true
 
             echo ""
+            echo "----- SDK errors -----"
+
+            grep -Ei \
+              "SDK|Build Tools|compileSdk|platforms;android|license" \
+              gradle-build.log \
+              | tail -100 || true
+
+            echo ""
             echo "----- Last 200 lines -----"
 
             tail -200 gradle-build.log
@@ -312,24 +466,42 @@ jobs:
           echo "APK BUILD SUCCESSFUL"
           echo "========================================"
 
+
+      # ==========================================================
+      # 15. Locate APK
+      # ==========================================================
       - name: Locate APK
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          APK=$(find . \
-            -type f \
-            -name "*.apk" \
-            -path "*/build/outputs/apk/*" \
-            -not -path "./.gradle/*" \
-            -print \
-            | head -1)
+          echo "Searching for APK..."
+
+          APK=$(
+            find . \
+              -type f \
+              -name "*.apk" \
+              -path "*/build/outputs/apk/*" \
+              -not -path "./.gradle/*" \
+              -print \
+              | head -1
+          )
 
           if [ -z "$APK" ]; then
             echo "::error::APK was not generated."
+
+            echo ""
+            echo "Build output directories:"
+
+            find . \
+              -type d \
+              -path "*/build/outputs/*" \
+              -print || true
+
             exit 1
           fi
 
+          echo ""
           echo "APK found:"
           echo "$APK"
 
@@ -338,9 +510,15 @@ jobs:
           cp "$APK" \
             "artifacts/Substack-Downloader-debug.apk"
 
+          echo ""
+          echo "Final APK:"
           ls -lh \
             "artifacts/Substack-Downloader-debug.apk"
 
+
+      # ==========================================================
+      # 16. Upload APK
+      # ==========================================================
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
@@ -349,6 +527,10 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+
+      # ==========================================================
+      # 17. Upload Gradle log if build fails
+      # ==========================================================
       - name: Upload Build Log
         if: failure()
         uses: actions/upload-artifact@v4
