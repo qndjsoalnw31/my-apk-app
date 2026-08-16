@@ -24,11 +24,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Java
+      - name: Setup Java 21
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: "21"
+
+      - name: Verify Java
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "JAVA_HOME=$JAVA_HOME"
+          java -version
+          javac -version
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
@@ -36,7 +44,7 @@ jobs:
       - name: Install Android SDK
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
 
@@ -51,12 +59,10 @@ jobs:
             "build-tools;34.0.0" \
             "build-tools;33.0.2"
 
-          echo "Android SDK installation completed."
-
       - name: Extract Project
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           if [ ! -f "substack-downloader.zip" ]; then
             echo "::error::substack-downloader.zip not found"
@@ -70,12 +76,12 @@ jobs:
 
           echo "ZIP extracted successfully."
 
-      - name: Find Android Project
+      - name: Find Project
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          SETTINGS_FILE=$(
+          SETTINGS_FILE="$(
             find extracted \
               -type f \
               \( \
@@ -85,7 +91,7 @@ jobs:
               \) \
               -print \
               -quit
-          )
+          )"
 
           if [ -z "$SETTINGS_FILE" ]; then
             echo "::error::settings.gradle or settings.gradle.kts not found"
@@ -97,29 +103,29 @@ jobs:
             exit 1
           fi
 
-          PROJECT_DIR=$(dirname "$SETTINGS_FILE")
+          PROJECT_DIR="$(dirname "$SETTINGS_FILE")"
 
-          echo "Android project:"
+          echo "Project directory:"
           echo "$PROJECT_DIR"
-
-          if [ ! -f "$PROJECT_DIR/build.gradle.kts" ] && [ ! -f "$PROJECT_DIR/build.gradle" ]; then
-            echo "::error::Root build.gradle or build.gradle.kts not found"
-            exit 1
-          fi
 
           if [ ! -d "$PROJECT_DIR/app" ]; then
             echo "::error::app module not found"
             exit 1
           fi
 
+          if [ ! -f "$PROJECT_DIR/build.gradle.kts" ] && [ ! -f "$PROJECT_DIR/build.gradle" ]; then
+            echo "::error::Root build.gradle or build.gradle.kts not found"
+            exit 1
+          fi
+
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-      - name: Detect Android Gradle Plugin
+      - name: Select Gradle Version
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          AGP_VERSION=$(
+          AGP_VERSION="$(
             grep -RhoE \
               'com\.android\.application[^0-9]*[0-9]+\.[0-9]+(\.[0-9]+)?' \
               "$PROJECT_DIR" \
@@ -130,10 +136,10 @@ jobs:
             grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' |
             head -1 ||
             true
-          )
+          )"
 
           if [ -z "$AGP_VERSION" ]; then
-            AGP_VERSION=$(
+            AGP_VERSION="$(
               grep -RhoE \
                 'agp[[:space:]]*=[[:space:]]*"?[0-9]+\.[0-9]+(\.[0-9]+)?' \
                 "$PROJECT_DIR" \
@@ -142,15 +148,15 @@ jobs:
               grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' |
               head -1 ||
               true
-            )
+            )"
           fi
 
           if [ -z "$AGP_VERSION" ]; then
             AGP_VERSION="9.1.1"
           fi
 
-          AGP_MAJOR=$(echo "$AGP_VERSION" | cut -d. -f1)
-          AGP_MINOR=$(echo "$AGP_VERSION" | cut -d. -f2)
+          AGP_MAJOR="$(echo "$AGP_VERSION" | cut -d. -f1)"
+          AGP_MINOR="$(echo "$AGP_VERSION" | cut -d. -f2)"
 
           echo "Detected AGP: $AGP_VERSION"
 
@@ -173,57 +179,74 @@ jobs:
                 ;;
             esac
           else
-            GRADLE_VERSION="8.13"
+            case "$AGP_MAJOR.$AGP_MINOR" in
+              8.13|8.12|8.11)
+                GRADLE_VERSION="8.13"
+                ;;
+              8.10|8.9)
+                GRADLE_VERSION="8.11.1"
+                ;;
+              8.8)
+                GRADLE_VERSION="8.10.2"
+                ;;
+              8.7)
+                GRADLE_VERSION="8.9"
+                ;;
+              8.6|8.5)
+                GRADLE_VERSION="8.7"
+                ;;
+              8.4)
+                GRADLE_VERSION="8.6"
+                ;;
+              8.3)
+                GRADLE_VERSION="8.4"
+                ;;
+              8.2)
+                GRADLE_VERSION="8.2"
+                ;;
+              8.1|8.0)
+                GRADLE_VERSION="8.0"
+                ;;
+              *)
+                GRADLE_VERSION="8.13"
+                ;;
+            esac
           fi
 
           echo "Selected Gradle: $GRADLE_VERSION"
-
           echo "AGP_VERSION=$AGP_VERSION" >> "$GITHUB_ENV"
           echo "GRADLE_VERSION=$GRADLE_VERSION" >> "$GITHUB_ENV"
-
-      - name: Download Gradle
-        shell: bash
-        run: |
-          set -e
-
-          cd /tmp
-
-          wget -q \
-            "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" \
-            -O gradle.zip
-
-          rm -rf "gradle-${GRADLE_VERSION}"
-
-          unzip -q gradle.zip
-
-          "/tmp/gradle-${GRADLE_VERSION}/bin/gradle" --version
 
       - name: Generate Gradle Wrapper
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           cd "$PROJECT_DIR"
 
-          if [ -f "gradlew" ] && [ -f "gradle/wrapper/gradle-wrapper.jar" ]; then
-            chmod +x gradlew
-            echo "Existing Gradle Wrapper found."
-          else
-            echo "Generating Gradle Wrapper..."
+          if [ ! -f "gradlew" ] || [ ! -f "gradle/wrapper/gradle-wrapper.jar" ]; then
+            cd /tmp
+
+            wget -q \
+              "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" \
+              -O gradle.zip
+
+            rm -rf "gradle-${GRADLE_VERSION}"
+            unzip -q gradle.zip
+
+            cd "$GITHUB_WORKSPACE/$PROJECT_DIR"
 
             "/tmp/gradle-${GRADLE_VERSION}/bin/gradle" wrapper \
               --gradle-version "$GRADLE_VERSION" \
               --distribution-type bin
-
-            chmod +x gradlew
           fi
+
+          chmod +x gradlew
 
       - name: Remove Google Services
         shell: bash
         run: |
-          set -e
-
-          echo "Removing Google Services..."
+          set -euo pipefail
 
           find "$PROJECT_DIR" \
             -type f \
@@ -249,10 +272,10 @@ jobs:
               -print0
           )
 
-      - name: Remove googleServices Blocks
+      - name: Remove Google Services Blocks
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           while IFS= read -r -d '' FILE; do
             sed -i \
@@ -266,6 +289,14 @@ jobs:
             sed -i \
               '/googleServices/d' \
               "$FILE" || true
+
+            sed -i \
+              '/MissingGoogleServicesStrategy/d' \
+              "$FILE" || true
+
+            sed -i \
+              '/missingGoogleServicesStrategy/d' \
+              "$FILE" || true
           done < <(
             find "$PROJECT_DIR" \
               -type f \
@@ -277,10 +308,46 @@ jobs:
               -print0
           )
 
+      - name: Configure Java 21
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP_KTS="$PROJECT_DIR/app/build.gradle.kts"
+          APP_GROOVY="$PROJECT_DIR/app/build.gradle"
+
+          if [ -f "$APP_KTS" ]; then
+            sed -i -E \
+              's/sourceCompatibility[[:space:]]*=[[:space:]]*JavaVersion\.VERSION_[0-9]+/sourceCompatibility = JavaVersion.VERSION_21/g' \
+              "$APP_KTS" || true
+
+            sed -i -E \
+              's/targetCompatibility[[:space:]]*=[[:space:]]*JavaVersion\.VERSION_[0-9]+/targetCompatibility = JavaVersion.VERSION_21/g' \
+              "$APP_KTS" || true
+
+            sed -i -E \
+              's/jvmTarget[[:space:]]*=[[:space:]]*"([0-9]+|JVM_[0-9]+)"/jvmTarget = "21"/g' \
+              "$APP_KTS" || true
+
+            sed -i -E \
+              's/jvmTarget[[:space:]]*=[[:space:]]*JvmTarget\.JVM_[0-9]+/jvmTarget = JvmTarget.JVM_21/g' \
+              "$APP_KTS" || true
+          fi
+
+          if [ -f "$APP_GROOVY" ]; then
+            sed -i -E \
+              's/sourceCompatibility[[:space:]]+JavaVersion\.VERSION_[0-9]+/sourceCompatibility JavaVersion.VERSION_21/g' \
+              "$APP_GROOVY" || true
+
+            sed -i -E \
+              's/targetCompatibility[[:space:]]+JavaVersion\.VERSION_[0-9]+/targetCompatibility JavaVersion.VERSION_21/g' \
+              "$APP_GROOVY" || true
+          fi
+
       - name: Force Compile SDK 36
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           APP_KTS="$PROJECT_DIR/app/build.gradle.kts"
           APP_GROOVY="$PROJECT_DIR/app/build.gradle"
@@ -297,7 +364,6 @@ jobs:
             if ! grep -Eq \
               'compileSdk[[:space:]]*=[[:space:]]*36|compileSdk[[:space:]]+36' \
               "$APP_KTS"; then
-
               sed -i \
                 '0,/android[[:space:]]*{/s//android {\n    compileSdk = 36/' \
                 "$APP_KTS"
@@ -310,62 +376,24 @@ jobs:
               "$APP_GROOVY" || true
           fi
 
-          echo "Final compileSdk configuration:"
-
-          grep -RniE \
-            'compileSdk' \
-            "$PROJECT_DIR/app" \
-            --include='*.gradle' \
-            --include='*.gradle.kts' \
-            || true
-
-      - name: Pin Compatible Lifecycle Version
+      - name: Pin Compatible Libraries
         shell: bash
         run: |
-          set -e
-
-          echo "Pinning Lifecycle to 2.10.0 for compileSdk 36 compatibility."
+          set -euo pipefail
 
           while IFS= read -r -d '' FILE; do
             sed -i \
-              's/androidx\.lifecycle:lifecycle-viewmodel-ktx:[0-9][0-9.]*/androidx.lifecycle:lifecycle-viewmodel-ktx:2.10.0/g' \
+              's/androidx\.lifecycle:lifecycle-runtime-compose:[0-9][0-9.]*/androidx.lifecycle:lifecycle-runtime-compose:2.10.0/g' \
               "$FILE" || true
 
             sed -i \
-              's/androidx\.lifecycle:lifecycle-runtime-compose:[0-9][0-9.]*/androidx.lifecycle:lifecycle-runtime-compose:2.10.0/g' \
+              's/androidx\.lifecycle:lifecycle-viewmodel-ktx:[0-9][0-9.]*/androidx.lifecycle:lifecycle-viewmodel-ktx:2.10.0/g' \
               "$FILE" || true
 
             sed -i \
               's/androidx\.lifecycle:lifecycle-viewmodel-compose:[0-9][0-9.]*/androidx.lifecycle:lifecycle-viewmodel-compose:2.10.0/g' \
               "$FILE" || true
 
-            sed -i \
-              's/lifecycle:[[:space:]]*=[[:space:]]*"2\.11\.0"/lifecycle = "2.10.0"/g' \
-              "$FILE" || true
-
-            sed -i \
-              's/lifecycle_version[[:space:]]*=[[:space:]]*"2\.11\.0"/lifecycle_version = "2.10.0"/g' \
-              "$FILE" || true
-
-          done < <(
-            find "$PROJECT_DIR" \
-              -type f \
-              \( \
-                -name "*.gradle" \
-                -o \
-                -name "*.gradle.kts" \
-                -o \
-                -name "*.toml" \
-              \) \
-              -print0
-          )
-
-      - name: Pin Compatible Activity Version
-        shell: bash
-        run: |
-          set -e
-
-          while IFS= read -r -d '' FILE; do
             sed -i \
               's/androidx\.activity:activity-compose:[0-9][0-9.]*/androidx.activity:activity-compose:1.12.0/g' \
               "$FILE" || true
@@ -393,7 +421,7 @@ jobs:
       - name: Inject Missing Dependencies
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           APP_GRADLE="$PROJECT_DIR/app/build.gradle.kts"
 
@@ -443,7 +471,7 @@ jobs:
             NEED_ACTIVITY_COMPOSE=1
           fi
 
-          TEMP_DEPS=$(mktemp)
+          TEMP_DEPS="$(mktemp)"
 
           if [ "$NEED_COROUTINES" -eq 1 ]; then
             if ! grep -q 'kotlinx-coroutines-android' "$APP_GRADLE"; then
@@ -494,11 +522,6 @@ jobs:
               cat "$TEMP_DEPS"
               echo "}"
             } >> "$APP_GRADLE"
-
-            echo "Injected dependencies:"
-            cat "$TEMP_DEPS"
-          else
-            echo "No missing dependencies detected."
           fi
 
           rm -f "$TEMP_DEPS"
@@ -506,7 +529,7 @@ jobs:
       - name: Generate Debug Keystore
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           cd "$PROJECT_DIR"
 
@@ -514,10 +537,10 @@ jobs:
             keytool \
               -genkeypair \
               -v \
-              -keystore "debug.keystore" \
-              -storepass "android" \
-              -alias "androiddebugkey" \
-              -keypass "android" \
+              -keystore debug.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
               -keyalg RSA \
               -keysize 2048 \
               -validity 10000 \
@@ -526,13 +549,13 @@ jobs:
 
           keytool \
             -list \
-            -keystore "debug.keystore" \
-            -storepass "android"
+            -keystore debug.keystore \
+            -storepass android >/dev/null
 
       - name: Configure Gradle
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           touch "$PROJECT_DIR/gradle.properties"
 
@@ -547,16 +570,19 @@ jobs:
             'org.gradle.caching=true' \
             >> "$PROJECT_DIR/gradle.properties"
 
-      - name: Final Configuration Check
+      - name: Verify Configuration
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           cd "$PROJECT_DIR"
 
-          echo "========================================"
-          echo "FINAL CONFIGURATION"
-          echo "========================================"
+          echo "Java:"
+          java -version
+
+          echo ""
+          echo "Javac:"
+          javac -version
 
           echo ""
           echo "Gradle:"
@@ -572,43 +598,18 @@ jobs:
             || true
 
           echo ""
-          echo "Lifecycle:"
+          echo "Java configuration:"
           grep -RniE \
-            'lifecycle-(runtime-compose|viewmodel-ktx|viewmodel-compose)' \
-            . \
+            'sourceCompatibility|targetCompatibility|jvmTarget|jvmToolchain|JavaLanguageVersion' \
+            app \
             --include='*.gradle' \
             --include='*.gradle.kts' \
-            --include='*.toml' \
             || true
-
-          echo ""
-          echo "Activity:"
-          grep -RniE \
-            'androidx\.activity' \
-            . \
-            --include='*.gradle' \
-            --include='*.gradle.kts' \
-            --include='*.toml' \
-            || true
-
-          echo ""
-          echo "Google Services:"
-          if grep -RniE \
-            'google\.services|google-services|com\.google\.gms|MissingGoogleServicesStrategy|missingGoogleServicesStrategy' \
-            . \
-            --include='*.gradle' \
-            --include='*.gradle.kts' \
-            --include='*.toml' \
-            2>/dev/null; then
-            echo "::warning::Google Services references remain."
-          else
-            echo "None."
-          fi
 
       - name: Validate Gradle
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           cd "$PROJECT_DIR"
 
@@ -620,7 +621,7 @@ jobs:
       - name: Clean Project
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           cd "$PROJECT_DIR"
 
@@ -646,17 +647,11 @@ jobs:
             --warning-mode all \
             2>&1 | tee "$GITHUB_WORKSPACE/gradle-build.log"
 
-          EXIT_CODE=${PIPESTATUS[0]}
+          CODE="${PIPESTATUS[0]}"
 
-          echo ""
-          echo "========================================"
-          echo "BUILD RESULT"
-          echo "EXIT CODE: $EXIT_CODE"
-          echo "========================================"
-
-          if [ "$EXIT_CODE" -ne 0 ]; then
+          if [ "$CODE" -ne 0 ]; then
             echo ""
-            echo "===== WHAT WENT WRONG ====="
+            echo "===== BUILD FAILURE ====="
 
             grep -A 50 -B 5 \
               "\* What went wrong" \
@@ -664,7 +659,16 @@ jobs:
               || true
 
             echo ""
-            echo "===== SDK / AAR ERRORS ====="
+            echo "===== JAVA ERRORS ====="
+
+            grep -Ei \
+              "invalid source|invalid target|source release|target release|javac|JDK|Java" \
+              "$GITHUB_WORKSPACE/gradle-build.log" \
+              | tail -100 \
+              || true
+
+            echo ""
+            echo "===== SDK ERRORS ====="
 
             grep -Ei \
               "compileSdk|requires libraries|compile against|AAR metadata|CheckAarMetadata" \
@@ -682,20 +686,11 @@ jobs:
               || true
 
             echo ""
-            echo "===== KOTLIN ERRORS ====="
-
-            grep -Ei \
-              "Unresolved reference|Script compilation error|Compilation error" \
-              "$GITHUB_WORKSPACE/gradle-build.log" \
-              | tail -100 \
-              || true
-
-            echo ""
             echo "===== LAST 200 LINES ====="
 
             tail -200 "$GITHUB_WORKSPACE/gradle-build.log"
 
-            exit "$EXIT_CODE"
+            exit "$CODE"
           fi
 
           echo ""
@@ -706,31 +701,22 @@ jobs:
       - name: Locate APK
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          APK=$(
+          APK="$(
             find "$PROJECT_DIR" \
               -type f \
               -name "*.apk" \
               -path "*/build/outputs/apk/*" \
               -print \
               -quit
-          )
+          )"
 
           if [ -z "$APK" ]; then
-            echo "::error::APK was not generated."
-
-            find "$PROJECT_DIR" \
-              -type f \
-              -name "*.apk" \
-              -print \
-              || true
-
+            echo "::error::APK was not generated"
+            find "$PROJECT_DIR" -type f -name "*.apk" -print || true
             exit 1
           fi
-
-          echo "APK found:"
-          echo "$APK"
 
           mkdir -p artifacts
 
