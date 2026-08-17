@@ -119,6 +119,7 @@ jobs:
           python3 <<'PY'
           from pathlib import Path
           import re
+          import unicodedata
 
           path = Path("project/app/build.gradle.kts")
 
@@ -127,15 +128,183 @@ jobs:
                   "ERROR: app/build.gradle.kts does not exist"
               )
 
-          text = path.read_text(encoding="utf-8")
+          text = path.read_text(
+              encoding="utf-8",
+              errors="replace"
+          )
 
           print("========================================")
-          print("ORIGINAL app/build.gradle.kts")
+          print("REPAIRING app/build.gradle.kts")
           print("========================================")
-          print(text)
 
           # ------------------------------------------------------
-          # Remove Google Services import
+          # 1. Remove BOM / normalize Unicode
+          # ------------------------------------------------------
+          text = text.replace("\ufeff", "")
+
+          # Normalize Unicode characters.
+          text = unicodedata.normalize("NFKC", text)
+
+          # ------------------------------------------------------
+          # 2. Replace invisible / invalid whitespace
+          # ------------------------------------------------------
+          invisible_chars = [
+              "\u00a0",  # non-breaking space
+              "\u1680",
+              "\u180e",
+              "\u2000",
+              "\u2001",
+              "\u2002",
+              "\u2003",
+              "\u2004",
+              "\u2005",
+              "\u2006",
+              "\u2007",
+              "\u2008",
+              "\u2009",
+              "\u200a",
+              "\u202f",
+              "\u205f",
+              "\u3000",
+          ]
+
+          for char in invisible_chars:
+              text = text.replace(char, " ")
+
+          # Remove zero-width characters.
+          for char in [
+              "\u200b",
+              "\u200c",
+              "\u200d",
+              "\u2060",
+              "\ufeff",
+          ]:
+              text = text.replace(char, "")
+
+          # ------------------------------------------------------
+          # 3. Normalize smart quotes
+          # ------------------------------------------------------
+          quote_map = {
+              "“": '"',
+              "”": '"',
+              "„": '"',
+              "‟": '"',
+              "‘": "'",
+              "’": "'",
+              "‚": "'",
+              "‛": "'",
+              "＂": '"',
+              "＇": "'",
+          }
+
+          for old, new in quote_map.items():
+              text = text.replace(old, new)
+
+          # ------------------------------------------------------
+          # 4. Remove invalid control characters
+          # ------------------------------------------------------
+          cleaned = []
+
+          for char in text:
+              code = ord(char)
+
+              if char in "\n\r\t":
+                  cleaned.append(char)
+                  continue
+
+              # Keep printable Unicode.
+              if code >= 32:
+                  cleaned.append(char)
+
+          text = "".join(cleaned)
+
+          # ------------------------------------------------------
+          # 5. Fix quoted Kotlin DSL function calls.
+          #
+          # Bad:
+          #
+          # "implementation"(libs.foo)
+          # "debugImplementation"(libs.foo)
+          # "testImplementation"(libs.foo)
+          # "ksp"(libs.foo)
+          #
+          # Good:
+          #
+          # implementation(libs.foo)
+          # debugImplementation(libs.foo)
+          # testImplementation(libs.foo)
+          # ksp(libs.foo)
+          # ------------------------------------------------------
+          dependency_functions = [
+              "implementation",
+              "api",
+              "compileOnly",
+              "runtimeOnly",
+              "testImplementation",
+              "testRuntimeOnly",
+              "androidTestImplementation",
+              "debugImplementation",
+              "releaseImplementation",
+              "debugApi",
+              "releaseApi",
+              "debugCompileOnly",
+              "releaseCompileOnly",
+              "debugRuntimeOnly",
+              "releaseRuntimeOnly",
+              "ksp",
+              "annotationProcessor",
+              "kapt",
+          ]
+
+          for func in dependency_functions:
+              text = re.sub(
+                  rf'["\']{re.escape(func)}["\']\s*\(',
+                  f"{func}(",
+                  text
+              )
+
+              text = re.sub(
+                  rf'`{re.escape(func)}`\s*\(',
+                  f"{func}(",
+                  text
+              )
+
+          # ------------------------------------------------------
+          # 6. Fix accidentally quoted plugin functions.
+          # ------------------------------------------------------
+          plugin_functions = [
+              "alias",
+              "id",
+              "implementation",
+              "ksp",
+              "kapt",
+          ]
+
+          for func in plugin_functions:
+              text = re.sub(
+                  rf'["\']{re.escape(func)}["\']\s*\(',
+                  f"{func}(",
+                  text
+              )
+
+          # ------------------------------------------------------
+          # 7. Fix broken spaces between function name and '('
+          # ------------------------------------------------------
+          for func in dependency_functions:
+              text = re.sub(
+                  rf'\b{re.escape(func)}\s+\(',
+                  f"{func}(",
+                  text
+              )
+
+          # ------------------------------------------------------
+          # 8. Fix escaped quotes accidentally inserted into DSL
+          # ------------------------------------------------------
+          text = text.replace('\\"', '"')
+          text = text.replace("\\'", "'")
+
+          # ------------------------------------------------------
+          # 9. Remove Google Services import
           # ------------------------------------------------------
           text = re.sub(
               r'^[ \t]*import[ \t]+com\.google\.gms\..*$\n?',
@@ -145,7 +314,7 @@ jobs:
           )
 
           # ------------------------------------------------------
-          # Remove Google Services plugin alias
+          # 10. Remove Google Services plugin alias
           # ------------------------------------------------------
           text = re.sub(
               r'^[ \t]*alias\s*\(\s*libs\.plugins\.google\.services\s*\).*$\n?',
@@ -155,7 +324,7 @@ jobs:
           )
 
           # ------------------------------------------------------
-          # Remove direct Google Services plugin
+          # 11. Remove direct Google Services plugin
           # ------------------------------------------------------
           text = re.sub(
               r'^[ \t]*id\s*\(\s*["\']com\.google\.gms\.google-services["\']\s*\).*$\n?',
@@ -165,12 +334,7 @@ jobs:
           )
 
           # ------------------------------------------------------
-          # Remove every direct debugConfig reference.
-          #
-          # This is the exact error from the current build:
-          #
-          # signingConfig =
-          # signingConfigs.getByName("debugConfig")
+          # 12. Remove debugConfig reference
           # ------------------------------------------------------
           text = re.sub(
               r'^[ \t]*signingConfig[ \t]*=[ \t]*signingConfigs\.getByName\s*\(\s*["\']debugConfig["\']\s*\)[ \t]*$\n?',
@@ -180,7 +344,7 @@ jobs:
           )
 
           # ------------------------------------------------------
-          # Also remove references even if formatting differs.
+          # 13. Remove any remaining debugConfig lines
           # ------------------------------------------------------
           text = re.sub(
               r'^[^\n]*debugConfig[^\n]*$\n?',
@@ -190,38 +354,56 @@ jobs:
           )
 
           # ------------------------------------------------------
-          # Remove googleServices { ... } using brace counting.
-          # Regex alone is unreliable with nested Kotlin blocks.
+          # 14. Remove googleServices { ... } safely
           # ------------------------------------------------------
-          lines = text.splitlines()
-          output = []
+          def remove_block(lines, pattern):
+              result = []
+              i = 0
 
-          i = 0
+              while i < len(lines):
+                  line = lines[i]
 
-          while i < len(lines):
-              line = lines[i]
-
-              if re.search(r'^\s*googleServices\s*\{', line):
-                  brace_count = line.count("{") - line.count("}")
-
-                  i += 1
-
-                  while i < len(lines) and brace_count > 0:
-                      brace_count += (
-                          lines[i].count("{")
-                          - lines[i].count("}")
+                  if re.search(pattern, line):
+                      brace_count = (
+                          line.count("{")
+                          - line.count("}")
                       )
+
                       i += 1
 
-                  continue
+                      while (
+                          i < len(lines)
+                          and brace_count > 0
+                      ):
+                          brace_count += (
+                              lines[i].count("{")
+                              - lines[i].count("}")
+                          )
+                          i += 1
 
-              output.append(line)
-              i += 1
+                      continue
 
-          text = "\n".join(output) + "\n"
+                  result.append(line)
+                  i += 1
+
+              return result
+
+          lines = text.splitlines()
+
+          lines = remove_block(
+              lines,
+              r'^\s*googleServices\s*\{'
+          )
+
+          lines = remove_block(
+              lines,
+              r'^\s*create\s*\(\s*["\']debugConfig["\']\s*\)\s*\{'
+          )
+
+          text = "\n".join(lines) + "\n"
 
           # ------------------------------------------------------
-          # Remove Google Services strategy references if any
+          # 15. Remove Google Services strategy references
           # ------------------------------------------------------
           text = re.sub(
               r'^[^\n]*MissingGoogleServicesStrategy[^\n]*$\n?',
@@ -238,47 +420,21 @@ jobs:
           )
 
           # ------------------------------------------------------
-          # Remove custom debug signing block.
-          #
-          # Handles:
-          #
-          # create("debugConfig") {
-          #     ...
-          # }
+          # 16. Normalize blank lines
           # ------------------------------------------------------
-          lines = text.splitlines()
-          output = []
+          text = re.sub(
+              r'\n{4,}',
+              '\n\n',
+              text
+          )
 
-          i = 0
-
-          while i < len(lines):
-              line = lines[i]
-
-              if re.search(
-                  r'^\s*create\s*\(\s*["\']debugConfig["\']\s*\)\s*\{',
-                  line
-              ):
-                  brace_count = line.count("{") - line.count("}")
-
-                  i += 1
-
-                  while i < len(lines) and brace_count > 0:
-                      brace_count += (
-                          lines[i].count("{")
-                          - lines[i].count("}")
-                      )
-                      i += 1
-
-                  continue
-
-              output.append(line)
-              i += 1
-
-          text = "\n".join(output) + "\n"
-
+          # ------------------------------------------------------
+          # 17. Write repaired file
+          # ------------------------------------------------------
           path.write_text(
               text,
-              encoding="utf-8"
+              encoding="utf-8",
+              newline="\n"
           )
 
           print("========================================")
@@ -288,7 +444,7 @@ jobs:
           PY
 
       # ==========================================================
-      # 6. Remove Google Services from root configuration
+      # 6. Repair ROOT Gradle files
       # ==========================================================
       - name: Repair root Gradle files
         shell: bash
@@ -298,19 +454,61 @@ jobs:
           python3 <<'PY'
           from pathlib import Path
           import re
+          import unicodedata
 
           files = []
 
-          root = Path("project/build.gradle.kts")
-          if root.exists():
-              files.append(root)
+          for filename in [
+              "project/build.gradle.kts",
+              "project/build.gradle",
+          ]:
+              path = Path(filename)
 
-          root_groovy = Path("project/build.gradle")
-          if root_groovy.exists():
-              files.append(root_groovy)
+              if path.exists():
+                  files.append(path)
 
           for path in files:
-              text = path.read_text(encoding="utf-8")
+              text = path.read_text(
+                  encoding="utf-8",
+                  errors="replace"
+              )
+
+              text = text.replace("\ufeff", "")
+              text = unicodedata.normalize("NFKC", text)
+
+              # Normalize spaces.
+              for char in [
+                  "\u00a0",
+                  "\u1680",
+                  "\u180e",
+                  "\u2000",
+                  "\u2001",
+                  "\u2002",
+                  "\u2003",
+                  "\u2004",
+                  "\u2005",
+                  "\u2006",
+                  "\u2007",
+                  "\u2008",
+                  "\u2009",
+                  "\u200a",
+                  "\u202f",
+                  "\u205f",
+                  "\u3000",
+              ]:
+                  text = text.replace(char, " ")
+
+              # Normalize quotes.
+              for old, new in {
+                  "“": '"',
+                  "”": '"',
+                  "„": '"',
+                  "‘": "'",
+                  "’": "'",
+                  "＂": '"',
+                  "＇": "'",
+              }.items():
+                  text = text.replace(old, new)
 
               text = re.sub(
                   r'^[ \t]*alias\s*\(\s*libs\.plugins\.google\.services\s*\).*$\n?',
@@ -328,44 +526,79 @@ jobs:
 
               path.write_text(
                   text,
-                  encoding="utf-8"
+                  encoding="utf-8",
+                  newline="\n"
               )
 
-              print(f"Repaired {path}")
-
-          # ------------------------------------------------------
-          # Remove Google Services from version catalog
-          # ------------------------------------------------------
-          catalog = Path("project/gradle/libs.versions.toml")
-
-          if catalog.exists():
-              text = catalog.read_text(
-                  encoding="utf-8"
-              )
-
-              text = re.sub(
-                  r'^.*google-services.*$\n?',
-                  '',
-                  text,
-                  flags=re.MULTILINE
-              )
-
-              text = re.sub(
-                  r'^.*googleServices.*$\n?',
-                  '',
-                  text,
-                  flags=re.MULTILINE
-              )
-
-              catalog.write_text(
-                  text,
-                  encoding="utf-8"
-              )
-
-              print("Repaired libs.versions.toml")
+              print(f"Repaired: {path}")
 
       # ==========================================================
-      # 7. Remove Google Services JSON
+      # 7. Repair Version Catalog WITHOUT destroying it
+      # ==========================================================
+      - name: Repair libs.versions.toml
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
+          from pathlib import Path
+          import unicodedata
+
+          path = Path("project/gradle/libs.versions.toml")
+
+          if not path.exists():
+              print("libs.versions.toml not found. Skipping.")
+              raise SystemExit(0)
+
+          text = path.read_text(
+              encoding="utf-8",
+              errors="replace"
+          )
+
+          text = text.replace("\ufeff", "")
+          text = unicodedata.normalize("NFKC", text)
+
+          for char in [
+              "\u00a0",
+              "\u1680",
+              "\u180e",
+              "\u2000",
+              "\u2001",
+              "\u2002",
+              "\u2003",
+              "\u2004",
+              "\u2005",
+              "\u2006",
+              "\u2007",
+              "\u2008",
+              "\u2009",
+              "\u200a",
+              "\u202f",
+              "\u205f",
+              "\u3000",
+          ]:
+              text = text.replace(char, " ")
+
+          for old, new in {
+              "“": '"',
+              "”": '"',
+              "„": '"',
+              "‘": "'",
+              "’": "'",
+          }.items():
+              text = text.replace(old, new)
+
+          path.write_text(
+              text,
+              encoding="utf-8",
+              newline="\n"
+          )
+
+          print("libs.versions.toml normalized.")
+          PY
+
+      # ==========================================================
+      # 8. Remove Google Services JSON
       # ==========================================================
       - name: Remove Firebase configuration
         shell: bash
@@ -381,79 +614,143 @@ jobs:
           echo "google-services.json removed if present."
 
       # ==========================================================
-      # 8. FINAL validation BEFORE Gradle
+      # 9. FINAL SOURCE SANITIZATION
       # ==========================================================
-      - name: Validate repaired source
+      - name: Sanitize all Kotlin Gradle scripts
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "========================================"
-          echo "VALIDATING PROJECT"
-          echo "========================================"
+          python3 <<'PY'
+          from pathlib import Path
+          import unicodedata
 
-          echo ""
-          echo "Searching for debugConfig..."
+          for path in Path("project").rglob("*.gradle.kts"):
 
-          if grep -Rni \
-            --include="*.gradle" \
-            --include="*.gradle.kts" \
-            "debugConfig" \
-            project 2>/dev/null; then
+              text = path.read_text(
+                  encoding="utf-8",
+                  errors="replace"
+              )
 
-            echo ""
-            echo "ERROR: debugConfig still exists."
-            echo "Build stopped before Gradle."
-            exit 1
-          fi
+              original = text
 
-          echo "OK: debugConfig does not exist."
+              text = text.replace("\ufeff", "")
+              text = unicodedata.normalize("NFKC", text)
 
-          echo ""
-          echo "Searching for Google Services..."
+              replacements = {
+                  "\u00a0": " ",
+                  "\u1680": " ",
+                  "\u180e": " ",
+                  "\u2000": " ",
+                  "\u2001": " ",
+                  "\u2002": " ",
+                  "\u2003": " ",
+                  "\u2004": " ",
+                  "\u2005": " ",
+                  "\u2006": " ",
+                  "\u2007": " ",
+                  "\u2008": " ",
+                  "\u2009": " ",
+                  "\u200a": " ",
+                  "\u202f": " ",
+                  "\u205f": " ",
+                  "\u3000": " ",
+                  "“": '"',
+                  "”": '"',
+                  "„": '"',
+                  "‘": "'",
+                  "’": "'",
+                  "‚": "'",
+                  "‛": "'",
+                  "＂": '"',
+                  "＇": "'",
+                  "\u200b": "",
+                  "\u200c": "",
+                  "\u200d": "",
+                  "\u2060": "",
+              }
 
-          if grep -Rni \
-            --include="*.gradle" \
-            --include="*.gradle.kts" \
-            "google-services" \
-            project 2>/dev/null; then
+              for old, new in replacements.items():
+                  text = text.replace(old, new)
 
-            echo ""
-            echo "ERROR: Google Services plugin reference remains."
-            exit 1
-          fi
+              if text != original:
+                  path.write_text(
+                      text,
+                      encoding="utf-8",
+                      newline="\n"
+                  )
 
-          if grep -Rni \
-            --include="*.gradle" \
-            --include="*.gradle.kts" \
-            "googleServices" \
-            project 2>/dev/null; then
-
-            echo ""
-            echo "ERROR: googleServices block/reference remains."
-            exit 1
-          fi
-
-          echo "OK: Google Services build configuration removed."
-
-          echo ""
-          echo "Searching for Firebase missing strategy..."
-
-          if grep -Rni \
-            --include="*.gradle" \
-            --include="*.gradle.kts" \
-            "MissingGoogleServicesStrategy" \
-            project 2>/dev/null; then
-
-            echo ""
-            echo "ERROR: MissingGoogleServicesStrategy remains."
-            exit 1
-          fi
-
-          echo "OK."
+                  print(
+                      f"Normalized hidden/Unicode characters: {path}"
+                  )
+          PY
 
       # ==========================================================
-      # 9. Java 17
+      # 10. Verify dependency syntax
+      # ==========================================================
+      - name: Verify Kotlin DSL dependency syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          FILE="project/app/build.gradle.kts"
+
+          echo "Checking:"
+          echo "$FILE"
+
+          # ------------------------------------------------------
+          # Illegal quoted dependency functions.
+          # ------------------------------------------------------
+          if grep -nE \
+            '["'\''](implementation|api|compileOnly|runtimeOnly|testImplementation|testRuntimeOnly|androidTestImplementation|debugImplementation|releaseImplementation|ksp|kapt|annotationProcessor)["'\'']\s*\(' \
+            "$FILE"; then
+
+            echo ""
+            echo "ERROR: Quoted Kotlin dependency function remains."
+            exit 1
+          fi
+
+          # ------------------------------------------------------
+          # Illegal debugConfig references.
+          # ------------------------------------------------------
+          if grep -n \
+            "debugConfig" \
+            "$FILE"; then
+
+            echo ""
+            echo "ERROR: debugConfig reference remains."
+            exit 1
+          fi
+
+          # ------------------------------------------------------
+          # Illegal Google Services references.
+          # ------------------------------------------------------
+          if grep -nE \
+            "googleServices|MissingGoogleServicesStrategy|libs\.plugins\.google\.services" \
+            "$FILE"; then
+
+            echo ""
+            echo "ERROR: Google Services reference remains."
+            exit 1
+          fi
+
+          # ------------------------------------------------------
+          # Detect common non-standard quotation characters.
+          # ------------------------------------------------------
+          if grep -nP \
+            '[\x{201C}\x{201D}\x{2018}\x{2019}\x{00A0}\x{200B}\x{200C}\x{200D}]' \
+            "$FILE"; then
+
+            echo ""
+            echo "ERROR: Hidden or non-standard Unicode characters remain."
+            exit 1
+          fi
+
+          echo ""
+          echo "Kotlin DSL dependency syntax is clean."
+
+      # ==========================================================
+      # 11. Java 17
       # ==========================================================
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -462,7 +759,7 @@ jobs:
           java-version: "17"
 
       # ==========================================================
-      # 10. Gradle 9.3.1
+      # 12. Gradle 9.3.1
       # ==========================================================
       - name: Set up Gradle 9.3.1
         uses: gradle/actions/setup-gradle@v4
@@ -470,7 +767,7 @@ jobs:
           gradle-version: "9.3.1"
 
       # ==========================================================
-      # 11. Android SDK
+      # 13. Android SDK
       # ==========================================================
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
@@ -488,7 +785,7 @@ jobs:
             "build-tools;36.0.0"
 
       # ==========================================================
-      # 12. Create Gradle Wrapper
+      # 14. Generate Gradle Wrapper
       # ==========================================================
       - name: Generate Gradle wrapper
         working-directory: project
@@ -507,7 +804,7 @@ jobs:
           ./gradlew --version
 
       # ==========================================================
-      # 13. Gradle configuration test
+      # 15. Gradle configuration test
       # ==========================================================
       - name: Test Gradle configuration
         working-directory: project
@@ -522,7 +819,7 @@ jobs:
             --warning-mode all
 
       # ==========================================================
-      # 14. Kotlin compilation
+      # 16. Compile Kotlin
       # ==========================================================
       - name: Compile Kotlin
         working-directory: project
@@ -547,9 +844,9 @@ jobs:
             echo "========================================"
 
             grep -E \
-              '(^e: |error: |Unresolved reference|Type mismatch|Expecting |Cannot access|Overload resolution ambiguity)' \
+              '(^e: |error: |Unresolved reference|Type mismatch|Expecting |Cannot access|Overload resolution ambiguity|Unexpected symbol|Unexpected tokens)' \
               kotlin-compile.log \
-              | head -150 \
+              | head -200 \
               || true
 
             echo ""
@@ -562,7 +859,7 @@ jobs:
               -A 8 \
               '^e: ' \
               kotlin-compile.log \
-              | head -250 \
+              | head -300 \
               || true
 
             exit "$EXIT_CODE"
@@ -571,7 +868,7 @@ jobs:
           echo "Kotlin compilation successful."
 
       # ==========================================================
-      # 15. Build APK
+      # 17. Build APK
       # ==========================================================
       - name: Build Debug APK
         working-directory: project
@@ -600,9 +897,9 @@ jobs:
             echo "========================================"
 
             grep -E \
-              'Execution failed for task|(^e: )|error: |What went wrong|Caused by:|FAILED|FAILURE' \
+              'Execution failed for task|(^e: )|error: |What went wrong|Caused by:|FAILED|FAILURE|Unexpected symbol|Unexpected tokens' \
               build.log \
-              | head -200 \
+              | head -250 \
               || true
 
             echo ""
@@ -621,7 +918,7 @@ jobs:
           echo "========================================"
 
       # ==========================================================
-      # 16. Find APK
+      # 18. Find APK
       # ==========================================================
       - name: Find APK
         shell: bash
@@ -644,7 +941,7 @@ jobs:
           echo "$APK"
 
       # ==========================================================
-      # 17. Prepare APK
+      # 19. Prepare APK
       # ==========================================================
       - name: Prepare APK artifact
         shell: bash
@@ -667,7 +964,7 @@ jobs:
             artifacts/APK-Builder-Mobile-debug.apk
 
       # ==========================================================
-      # 18. Upload APK
+      # 20. Upload APK
       # ==========================================================
       - name: Upload APK
         uses: actions/upload-artifact@v4
@@ -678,7 +975,7 @@ jobs:
           retention-days: 7
 
       # ==========================================================
-      # 19. Upload logs if failed
+      # 21. Upload diagnostics if failed
       # ==========================================================
       - name: Upload diagnostics
         if: failure()
