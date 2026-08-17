@@ -46,11 +46,11 @@ jobs:
             exit 1
           fi
 
-          echo "Found:"
+          echo "ZIP found:"
           ls -lh untitled.zip
 
       # ==========================================================
-      # 3. Extract ZIP
+      # 3. Extract project
       # ==========================================================
       - name: Extract project
         shell: bash
@@ -85,19 +85,13 @@ jobs:
 
           if [ -z "$SETTINGS_FILE" ]; then
             echo "ERROR: Android Gradle project not found."
-
-            find extracted \
-              -maxdepth 6 \
-              -type f \
-              | sort \
-              | head -500
-
+            find extracted -maxdepth 6 -type f | sort | head -500
             exit 1
           fi
 
           PROJECT_DIR="$(dirname "$SETTINGS_FILE")"
 
-          echo "Project:"
+          echo "Android project:"
           echo "$PROJECT_DIR"
 
           cp -a "$PROJECT_DIR"/. project/
@@ -123,9 +117,7 @@ jobs:
           path = Path("project/app/build.gradle.kts")
 
           if not path.exists():
-              raise SystemExit(
-                  "ERROR: app/build.gradle.kts not found"
-              )
+              raise SystemExit("ERROR: app/build.gradle.kts not found")
 
           text = path.read_text(
               encoding="utf-8",
@@ -133,42 +125,28 @@ jobs:
           )
 
           # ------------------------------------------------------
-          # Normalize Unicode
+          # Normalize BOM / Unicode / invisible characters
           # ------------------------------------------------------
           text = text.replace("\ufeff", "")
           text = unicodedata.normalize("NFKC", text)
 
           for ch in [
-              "\u00a0",
-              "\u1680",
-              "\u180e",
-              "\u2000",
-              "\u2001",
-              "\u2002",
-              "\u2003",
-              "\u2004",
-              "\u2005",
-              "\u2006",
-              "\u2007",
-              "\u2008",
-              "\u2009",
-              "\u200a",
-              "\u202f",
-              "\u205f",
-              "\u3000",
+              "\u00a0", "\u1680", "\u180e",
+              "\u2000", "\u2001", "\u2002", "\u2003",
+              "\u2004", "\u2005", "\u2006", "\u2007",
+              "\u2008", "\u2009", "\u200a",
+              "\u202f", "\u205f", "\u3000"
           ]:
               text = text.replace(ch, " ")
 
           for ch in [
-              "\u200b",
-              "\u200c",
-              "\u200d",
-              "\u2060",
-              "\ufeff",
+              "\u200b", "\u200c", "\u200d",
+              "\u2060", "\ufeff"
           ]:
               text = text.replace(ch, "")
 
-          for old, new in {
+          # Smart quotes -> normal quotes.
+          replacements = {
               "“": '"',
               "”": '"',
               "„": '"',
@@ -179,14 +157,19 @@ jobs:
               "‛": "'",
               "＂": '"',
               "＇": "'",
-          }.items():
+          }
+
+          for old, new in replacements.items():
               text = text.replace(old, new)
 
           text = text.replace('\\"', '"')
           text = text.replace("\\'", "'")
 
           # ------------------------------------------------------
-          # Fix quoted dependency calls
+          # Fix dependency function syntax.
+          #
+          # "ksp"(...) -> ksp(...)
+          # "implementation"(...) -> implementation(...)
           # ------------------------------------------------------
           dependency_functions = [
               "implementation",
@@ -210,6 +193,7 @@ jobs:
           ]
 
           for function in dependency_functions:
+
               text = re.sub(
                   rf'["\']{re.escape(function)}["\']\s*\(',
                   f"{function}(",
@@ -253,21 +237,14 @@ jobs:
           )
 
           text = re.sub(
-              r'^[^\n]*MissingGoogleServicesStrategy[^\n]*$\n?',
-              '',
-              text,
-              flags=re.MULTILINE
-          )
-
-          text = re.sub(
-              r'^[^\n]*missingGoogleServicesStrategy[^\n]*$\n?',
+              r'^[^\n]*(MissingGoogleServicesStrategy|missingGoogleServicesStrategy)[^\n]*$\n?',
               '',
               text,
               flags=re.MULTILINE
           )
 
           # ------------------------------------------------------
-          # Remove debugConfig direct references
+          # Remove debugConfig references
           # ------------------------------------------------------
           text = re.sub(
               r'^[^\n]*signingConfigs\.getByName\s*\(\s*["\']debugConfig["\']\s*\)[^\n]*$\n?',
@@ -276,51 +253,21 @@ jobs:
               flags=re.MULTILINE
           )
 
-          text = re.sub(
-              r'^[^\n]*debugConfig[^\n]*$\n?',
-              '',
-              text,
-              flags=re.MULTILINE
-          )
-
           # ------------------------------------------------------
-          # Kotlin-aware block remover
+          # Kotlin-aware brace matcher.
+          #
+          # States:
+          # code
+          # line_comment
+          # block_comment
+          # double_string
+          # triple_string
+          # char
           # ------------------------------------------------------
-          def remove_named_block(source, name):
-              pattern = re.compile(
-                  rf'(?m)^[ \t]*{re.escape(name)}\s*\{{'
-              )
-
-              match = pattern.search(source)
-
-              while match:
-                  start = match.start()
-                  brace = source.find("{", match.start())
-
-                  end = find_matching_brace(
-                      source,
-                      brace
-                  )
-
-                  if end is None:
-                      # Leave it alone if malformed. Gradle will
-                      # report the actual location later.
-                      return source
-
-                  source = (
-                      source[:start]
-                      + source[end + 1:]
-                  )
-
-                  match = pattern.search(source)
-
-              return source
-
           def find_matching_brace(source, opening_index):
               depth = 0
               i = opening_index
               n = len(source)
-
               state = "code"
 
               while i < n:
@@ -339,7 +286,7 @@ jobs:
                           i += 2
                           continue
 
-                      if ch == '"' and source[i:i+3] == '"""':
+                      if source[i:i+3] == '"""':
                           state = "triple_string"
                           i += 3
                           continue
@@ -367,28 +314,35 @@ jobs:
                       continue
 
                   if state == "line_comment":
+
                       if ch == "\n":
                           state = "code"
+
                       i += 1
                       continue
 
                   if state == "block_comment":
+
                       if ch == "*" and nxt == "/":
                           state = "code"
                           i += 2
                           continue
+
                       i += 1
                       continue
 
                   if state == "triple_string":
+
                       if source[i:i+3] == '"""':
                           state = "code"
                           i += 3
                           continue
+
                       i += 1
                       continue
 
                   if state == "double_string":
+
                       if ch == "\\":
                           i += 2
                           continue
@@ -400,6 +354,7 @@ jobs:
                       continue
 
                   if state == "char":
+
                       if ch == "\\":
                           i += 2
                           continue
@@ -412,30 +367,87 @@ jobs:
 
               return None
 
-          # Remove only the known bad blocks.
+          # ------------------------------------------------------
+          # Remove a named Kotlin block.
+          # ------------------------------------------------------
+          def remove_named_block(source, name):
+              pattern = re.compile(
+                  rf'(?m)^[ \t]*{re.escape(name)}\s*\{{'
+              )
+
+              while True:
+
+                  match = pattern.search(source)
+
+                  if not match:
+                      return source
+
+                  opening = source.find(
+                      "{",
+                      match.start()
+                  )
+
+                  closing = find_matching_brace(
+                      source,
+                      opening
+                  )
+
+                  if closing is None:
+                      return source
+
+                  source = (
+                      source[:match.start()]
+                      + source[closing + 1:]
+                  )
+
           text = remove_named_block(
               text,
               "googleServices"
           )
 
-          text = remove_named_block(
-              text,
-              'create("debugConfig")'
+          # Debug signing block.
+          debug_pattern = re.compile(
+              r'(?m)^[ \t]*create\s*\(\s*["\']debugConfig["\']\s*\)\s*\{'
           )
 
+          while True:
+
+              match = debug_pattern.search(text)
+
+              if not match:
+                  break
+
+              opening = text.find(
+                  "{",
+                  match.start()
+              )
+
+              closing = find_matching_brace(
+                  text,
+                  opening
+              )
+
+              if closing is None:
+                  break
+
+              text = (
+                  text[:match.start()]
+                  + text[closing + 1:]
+              )
+
           # ------------------------------------------------------
-          # Find dependencies block with Kotlin-aware scanner.
+          # Repair dependencies block.
           # ------------------------------------------------------
-          dependency_match = re.search(
+          dep_match = re.search(
               r'(?m)^[ \t]*dependencies\s*\{',
               text
           )
 
-          if dependency_match:
+          if dep_match:
 
               opening = text.find(
                   "{",
-                  dependency_match.start()
+                  dep_match.start()
               )
 
               closing = find_matching_brace(
@@ -445,15 +457,14 @@ jobs:
 
               if closing is not None:
 
-                  old_block = text[
+                  old_dependencies = text[
                       opening + 1:
                       closing
                   ]
 
                   recovered = []
 
-                  # Recover normal single-line dependency calls.
-                  dep_pattern = re.compile(
+                  dependency_pattern = re.compile(
                       r'(?m)^[ \t]*('
                       + "|".join(
                           map(re.escape, dependency_functions)
@@ -461,8 +472,8 @@ jobs:
                       + r')\s*\((.*?)\)\s*$'
                   )
 
-                  for match in dep_pattern.finditer(
-                      old_block
+                  for match in dependency_pattern.finditer(
+                      old_dependencies
                   ):
                       function = match.group(1)
                       argument = match.group(2).strip()
@@ -499,17 +510,18 @@ jobs:
                       )
 
                       text = (
-                          text[:dependency_match.start()]
+                          text[:dep_match.start()]
                           + new_block
                           + text[closing + 1:]
                       )
 
                       print(
-                          f"Recovered {len(recovered)} dependency declarations."
+                          "Recovered dependency entries:",
+                          len(recovered)
                       )
 
           # ------------------------------------------------------
-          # Final whitespace normalization
+          # Normalize newlines.
           # ------------------------------------------------------
           text = text.replace("\r\n", "\n")
           text = text.replace("\r", "\n")
@@ -521,9 +533,9 @@ jobs:
               newline="\n"
           )
 
-          print("========================================")
-          print("APP GRADLE REPAIR COMPLETE")
-          print("========================================")
+          print(
+              "app/build.gradle.kts repaired."
+          )
           PY
 
       # ==========================================================
@@ -539,10 +551,10 @@ jobs:
           import re
           import unicodedata
 
-          for filename in [
+          for filename in (
               "project/build.gradle.kts",
               "project/build.gradle",
-          ]:
+          ):
 
               path = Path(filename)
 
@@ -560,36 +572,18 @@ jobs:
                   text
               )
 
-              replacements = {
-                  "\u00a0": " ",
-                  "\u1680": " ",
-                  "\u180e": " ",
-                  "\u2000": " ",
-                  "\u2001": " ",
-                  "\u2002": " ",
-                  "\u2003": " ",
-                  "\u2004": " ",
-                  "\u2005": " ",
-                  "\u2006": " ",
-                  "\u2007": " ",
-                  "\u2008": " ",
-                  "\u2009": " ",
-                  "\u200a": " ",
-                  "\u202f": " ",
-                  "\u205f": " ",
-                  "\u3000": " ",
+              for old, new in {
                   "“": '"',
                   "”": '"',
                   "„": '"',
                   "‘": "'",
                   "’": "'",
+                  "\u00a0": " ",
                   "\u200b": "",
                   "\u200c": "",
                   "\u200d": "",
                   "\u2060": "",
-              }
-
-              for old, new in replacements.items():
+              }.items():
                   text = text.replace(old, new)
 
               text = re.sub(
@@ -605,7 +599,9 @@ jobs:
                   newline="\n"
               )
 
-              print(f"Repaired: {path}")
+              print(
+                  f"Repaired {path}"
+              )
           PY
 
       # ==========================================================
@@ -616,6 +612,11 @@ jobs:
         run: |
           set -euo pipefail
 
+          if [ ! -f "project/gradle/libs.versions.toml" ]; then
+            echo "libs.versions.toml not found."
+            exit 0
+          fi
+
           python3 <<'PY'
           from pathlib import Path
           import unicodedata
@@ -623,12 +624,6 @@ jobs:
           path = Path(
               "project/gradle/libs.versions.toml"
           )
-
-          if not path.exists():
-              print(
-                  "libs.versions.toml not found."
-              )
-              raise SystemExit(0)
 
           text = path.read_text(
               encoding="utf-8",
@@ -641,38 +636,20 @@ jobs:
               text
           )
 
-          for ch in [
-              "\u00a0",
-              "\u1680",
-              "\u180e",
-              "\u2000",
-              "\u2001",
-              "\u2002",
-              "\u2003",
-              "\u2004",
-              "\u2005",
-              "\u2006",
-              "\u2007",
-              "\u2008",
-              "\u2009",
-              "\u200a",
-              "\u202f",
-              "\u205f",
-              "\u3000",
-          ]:
-              text = text.replace(ch, " ")
-
-          for old, new in {
+          replacements = {
               "“": '"',
               "”": '"',
               "„": '"',
               "‘": "'",
               "’": "'",
+              "\u00a0": " ",
               "\u200b": "",
               "\u200c": "",
               "\u200d": "",
               "\u2060": "",
-          }.items():
+          }
+
+          for old, new in replacements.items():
               text = text.replace(old, new)
 
           path.write_text(
@@ -687,7 +664,7 @@ jobs:
           PY
 
       # ==========================================================
-      # 8. Remove google-services.json
+      # 8. Remove Google Services JSON
       # ==========================================================
       - name: Remove Google Services JSON
         shell: bash
@@ -700,12 +677,10 @@ jobs:
             -delete \
             || true
 
-          echo "Google Services JSON removed if present."
-
       # ==========================================================
-      # 9. Robust Gradle syntax validation
+      # 9. Validate Gradle source
       # ==========================================================
-      - name: Validate Gradle syntax
+      - name: Validate Gradle source
         shell: bash
         run: |
           set -euo pipefail
@@ -714,24 +689,10 @@ jobs:
           from pathlib import Path
           import re
 
-          def scan_braces(text):
-              """
-              Kotlin-aware brace scanner.
-
-              Ignores:
-              - // comments
-              - /* comments */
-              - "strings"
-              - """triple strings"""
-              - 'chars'
-              """
-
+          def validate_braces(text):
               depth = 0
-              stack = []
-
               i = 0
               n = len(text)
-
               state = "code"
 
               while i < n:
@@ -772,18 +733,16 @@ jobs:
 
                       if ch == "{":
                           depth += 1
-                          stack.append(i)
 
                       elif ch == "}":
 
                           if depth == 0:
-                              return False, i, (
+                              return False, (
                                   "closing brace without "
                                   "matching opening brace"
                               )
 
                           depth -= 1
-                          stack.pop()
 
                       i += 1
                       continue
@@ -841,12 +800,12 @@ jobs:
                       continue
 
               if depth != 0:
-                  return False, stack[-1], (
+                  return False, (
                       f"unclosed opening brace "
                       f"(depth={depth})"
                   )
 
-              return True, None, None
+              return True, "OK"
 
           files = list(
               Path("project").rglob("*.gradle.kts")
@@ -863,58 +822,20 @@ jobs:
                   errors="replace"
               )
 
-              valid, position, error = scan_braces(
+              valid, message = validate_braces(
                   text
               )
 
               if not valid:
-
-                  line = (
-                      text.count(
-                          "\n",
-                          0,
-                          position
-                      )
-                      + 1
-                  )
-
                   print(
-                      f"ERROR: {path}"
+                      f"ERROR: {path}: {message}"
                   )
-                  print(
-                      f"ERROR: line {line}"
-                  )
-                  print(
-                      f"ERROR: {error}"
-                  )
-
-                  start = max(
-                      0,
-                      position - 150
-                  )
-
-                  end = min(
-                      len(text),
-                      position + 150
-                  )
-
-                  print("")
-                  print(
-                      "Context:"
-                  )
-                  print(
-                      text[start:end]
-                  )
-
                   raise SystemExit(1)
 
               print(
                   f"OK: {path}"
               )
 
-          # ------------------------------------------------------
-          # Specific dependency validations.
-          # ------------------------------------------------------
           app = Path(
               "project/app/build.gradle.kts"
           )
@@ -923,37 +844,36 @@ jobs:
               encoding="utf-8"
           )
 
-          forbidden = [
+          forbidden = (
               "debugConfig",
               "MissingGoogleServicesStrategy",
               "missingGoogleServicesStrategy",
               "libs.plugins.google.services",
-          ]
+          )
 
-          for item in forbidden:
-              if item in text:
+          for value in forbidden:
+
+              if value in text:
                   raise SystemExit(
-                      f"ERROR: forbidden reference remains: {item}"
+                      f"ERROR: forbidden reference remains: {value}"
                   )
 
-          quoted = re.findall(
+          bad_dependency = re.compile(
               r'["\']'
               r'(implementation|api|compileOnly|runtimeOnly|'
               r'testImplementation|testRuntimeOnly|'
               r'androidTestImplementation|debugImplementation|'
               r'releaseImplementation|ksp|kapt|annotationProcessor)'
-              r'["\']\s*\(',
-              text
+              r'["\']\s*\('
           )
 
-          if quoted:
+          if bad_dependency.search(text):
               raise SystemExit(
-                  "ERROR: quoted dependency functions remain: "
-                  + ", ".join(quoted)
+                  "ERROR: quoted dependency function remains."
               )
 
           print(
-              "Gradle syntax validation successful."
+              "Gradle source validation passed."
           )
           PY
 
@@ -975,12 +895,12 @@ jobs:
           gradle-version: "9.3.1"
 
       # ==========================================================
-      # 12. Android SDK
+      # 12. Setup Android SDK
       # ==========================================================
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK
+      - name: Install Android SDK components
         shell: bash
         run: |
           set -euo pipefail
@@ -1013,7 +933,7 @@ jobs:
           ./gradlew --version
 
       # ==========================================================
-      # 14. Gradle configuration
+      # 14. Test Gradle configuration
       # ==========================================================
       - name: Test Gradle configuration
         working-directory: project
