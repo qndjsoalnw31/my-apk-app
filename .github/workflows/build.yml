@@ -16,47 +16,48 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
+      CI: true
       GRADLE_OPTS: >-
         -Xmx4g
         -XX:MaxMetaspaceSize=1g
         -Dfile.encoding=UTF-8
-      CI: true
 
     steps:
-      # ---------------------------------------------------------
+
+      # ==========================================================
       # 1. Checkout
-      # ---------------------------------------------------------
+      # ==========================================================
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ---------------------------------------------------------
-      # 2. Verify uploaded ZIP
-      # ---------------------------------------------------------
+      # ==========================================================
+      # 2. Verify ZIP
+      # ==========================================================
       - name: Verify project ZIP
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Repository contents:"
-          ls -la
+          echo "Repository files:"
+          find . -maxdepth 2 -type f | sort | head -200
 
           if [ ! -f "untitled.zip" ]; then
             echo ""
             echo "ERROR: untitled.zip not found"
             echo ""
-            echo "Available ZIP files:"
-            find . -maxdepth 2 -type f -iname "*.zip" -print || true
+            echo "ZIP files found:"
+            find . -type f -iname "*.zip" -print || true
             exit 1
           fi
 
           echo ""
-          echo "Found: untitled.zip"
-          ls -lh "untitled.zip"
+          echo "Found project archive:"
+          ls -lh untitled.zip
 
-      # ---------------------------------------------------------
-      # 3. Extract ZIP
-      # ---------------------------------------------------------
-      - name: Extract project ZIP
+      # ==========================================================
+      # 3. Extract
+      # ==========================================================
+      - name: Extract project
         shell: bash
         run: |
           set -euo pipefail
@@ -64,254 +65,278 @@ jobs:
           rm -rf extracted
           mkdir -p extracted
 
-          unzip -o "untitled.zip" -d extracted
+          unzip -o untitled.zip -d extracted
 
           echo ""
-          echo "ZIP extracted successfully"
-          echo ""
-          echo "Top-level contents:"
-          find extracted -maxdepth 2 -print | sort | head -200
+          echo "Archive extracted."
 
-      # ---------------------------------------------------------
+      # ==========================================================
       # 4. Locate Android project
-      # ---------------------------------------------------------
-      - name: Find Android project
+      # ==========================================================
+      - name: Locate Android project
         shell: bash
         run: |
           set -euo pipefail
 
-          SETTINGS_FILE="$(
+          SETTINGS_FILE=$(
             find extracted \
               -type f \
               \( -name "settings.gradle" -o -name "settings.gradle.kts" \) \
               -print -quit
-          )"
+          )
 
           if [ -z "$SETTINGS_FILE" ]; then
-            echo "ERROR: settings.gradle/settings.gradle.kts not found"
+            echo "ERROR: No Android Gradle project found."
             echo ""
-            echo "Extracted project tree:"
-            find extracted -maxdepth 4 -type f | sort | head -300
+            find extracted -maxdepth 5 -type f | sort | head -400
             exit 1
           fi
 
           PROJECT_DIR="$(dirname "$SETTINGS_FILE")"
 
-          echo "========================================"
-          echo "ANDROID PROJECT FOUND"
-          echo "========================================"
-          echo "Project directory: $PROJECT_DIR"
+          echo "Android project:"
+          echo "$PROJECT_DIR"
 
-          # Copy project contents into workspace root.
           shopt -s dotglob nullglob
-          cp -R "$PROJECT_DIR"/* .
+
+          rm -rf workspace-project
+          mkdir -p workspace-project
+
+          cp -R "$PROJECT_DIR"/* workspace-project/
 
           echo ""
-          echo "Project copied to workspace root."
+          echo "Project copied."
 
-      # ---------------------------------------------------------
-      # 5. Verify Android project files
-      # ---------------------------------------------------------
-      - name: Verify Android project
+          cd workspace-project
+
+          echo ""
+          echo "Project structure:"
+          find . -maxdepth 3 -type f | sort | head -300
+
+      # ==========================================================
+      # 5. Repair Android project configuration
+      # ==========================================================
+      - name: Repair project configuration
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "===== ROOT FILES ====="
-          find . -maxdepth 2 -type f | sort | head -300
-
-          echo ""
-          echo "===== REQUIRED FILES ====="
-
-          for file in \
-            "settings.gradle.kts" \
-            "build.gradle.kts" \
-            "gradle/libs.versions.toml" \
-            "app/build.gradle.kts" \
-            "app/src/main/AndroidManifest.xml"
-          do
-            if [ ! -f "$file" ]; then
-              echo "ERROR: Missing required file: $file"
-              exit 1
-            fi
-
-            echo "OK: $file"
-          done
-
-      # ---------------------------------------------------------
-      # 6. Remove Google Services dependency for CI build
-      # ---------------------------------------------------------
-      - name: Disable Google Services plugin
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "Disabling Google Services plugin because no Firebase configuration"
-          echo "file is supplied in the uploaded project."
+          cd workspace-project
 
           python3 <<'PY'
           from pathlib import Path
           import re
 
-          files = [
-              Path("build.gradle.kts"),
-              Path("app/build.gradle.kts"),
-          ]
+          print("========================================")
+          print("REPAIRING PROJECT CONFIGURATION")
+          print("========================================")
 
-          for path in files:
-              if not path.exists():
-                  continue
+          # ------------------------------------------------------
+          # app/build.gradle.kts
+          # ------------------------------------------------------
+          app = Path("app/build.gradle.kts")
 
-              text = path.read_text(encoding="utf-8")
+          if not app.exists():
+              raise SystemExit("ERROR: app/build.gradle.kts not found")
 
-              # Remove Google Services plugin aliases.
-              text = re.sub(
-                  r'^\s*alias\(libs\.plugins\.google\.services\)\s*(?:apply\s+false)?\s*$\n?',
-                  '',
-                  text,
-                  flags=re.MULTILINE,
-              )
+          text = app.read_text(encoding="utf-8")
 
-              # Remove direct Google Services plugin id lines.
-              text = re.sub(
-                  r'^\s*id\(["\']com\.google\.gms\.google-services["\']\).*$\n?',
-                  '',
-                  text,
-                  flags=re.MULTILINE,
-              )
-
-              path.write_text(text, encoding="utf-8")
-
-              print(f"Updated: {path}")
-          PY
-
-          # Remove any Google Services JSON files if present.
-          find . \
-            -type f \
-            -name "google-services.json" \
-            -delete
-
-          echo "Google Services configuration disabled."
-
-      # ---------------------------------------------------------
-      # 7. Remove custom debug signing config
-      # ---------------------------------------------------------
-      - name: Normalize debug signing
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          python3 <<'PY'
-          from pathlib import Path
-          import re
-
-          path = Path("app/build.gradle.kts")
-          text = path.read_text(encoding="utf-8")
-
-          # Remove custom debug signing block.
+          # Remove Google Services import.
           text = re.sub(
-              r'\s*create\("debugConfig"\)\s*\{.*?\n\s*\}\s*(?=\n\s*\})',
+              r'^\s*import\s+com\.google\.gms\.googleservices\.GoogleServicesPlugin\.MissingGoogleServicesStrategy\s*$\n?',
               '',
               text,
-              flags=re.DOTALL,
+              flags=re.MULTILINE
           )
 
-          # Remove explicit debug signing assignment.
+          # Remove Google Services plugin alias.
+          text = re.sub(
+              r'^\s*alias\(libs\.plugins\.google\.services\)\s*$\n?',
+              '',
+              text,
+              flags=re.MULTILINE
+          )
+
+          # Remove googleServices { ... } block.
+          text = re.sub(
+              r'\n?\s*googleServices\s*\{.*?\n\s*\}',
+              '',
+              text,
+              flags=re.DOTALL
+          )
+
+          # Remove custom debug signing configuration.
+          text = re.sub(
+              r'\n\s*create\("debugConfig"\)\s*\{.*?\n\s*\}',
+              '',
+              text,
+              flags=re.DOTALL
+          )
+
+          # Remove debugConfig assignment.
           text = re.sub(
               r'^\s*debug\s*\{\s*signingConfig\s*=\s*signingConfigs\.getByName\("debugConfig"\)\s*\}\s*$',
               'debug { }',
               text,
-              flags=re.MULTILINE,
+              flags=re.MULTILINE
           )
 
-          # Remove any remaining references just in case.
+          # Remove any remaining references.
           text = re.sub(
               r'^\s*signingConfig\s*=\s*signingConfigs\.getByName\("debugConfig"\)\s*$\n?',
               '',
               text,
-              flags=re.MULTILINE,
+              flags=re.MULTILINE
           )
 
-          path.write_text(text, encoding="utf-8")
+          app.write_text(text, encoding="utf-8")
 
-          print("Normalized app/build.gradle.kts")
+          print("Repaired app/build.gradle.kts")
+
+          # ------------------------------------------------------
+          # Root build.gradle.kts
+          # ------------------------------------------------------
+          root = Path("build.gradle.kts")
+
+          if root.exists():
+              text = root.read_text(encoding="utf-8")
+
+              text = re.sub(
+                  r'^\s*alias\(libs\.plugins\.google\.services\)\s*apply\s*false\s*$\n?',
+                  '',
+                  text,
+                  flags=re.MULTILINE
+              )
+
+              root.write_text(text, encoding="utf-8")
+
+              print("Repaired build.gradle.kts")
+
+          # ------------------------------------------------------
+          # Version catalog
+          # ------------------------------------------------------
+          catalog = Path("gradle/libs.versions.toml")
+
+          if catalog.exists():
+              text = catalog.read_text(encoding="utf-8")
+
+              # Remove Google Services version.
+              text = re.sub(
+                  r'^\s*googleServices\s*=.*$\n?',
+                  '',
+                  text,
+                  flags=re.MULTILINE
+              )
+
+              # Remove Google Services plugin declaration.
+              text = re.sub(
+                  r'^\s*google-services\s*=\s*\{\s*id\s*=\s*"com\.google\.gms\.google-services".*$\n?',
+                  '',
+                  text,
+                  flags=re.MULTILINE
+              )
+
+              catalog.write_text(text, encoding="utf-8")
+
+              print("Repaired gradle/libs.versions.toml")
+
+          # ------------------------------------------------------
+          # Remove Firebase configuration that requires the
+          # Google Services Gradle plugin during the build.
+          #
+          # Firebase libraries themselves can remain available
+          # unless the application actually requires runtime
+          # Firebase configuration.
+          # ------------------------------------------------------
+          for name in [
+              "google-services.json"
+          ]:
+              for file in Path(".").rglob(name):
+                  try:
+                      file.unlink()
+                      print(f"Removed: {file}")
+                  except Exception:
+                      pass
+
+          print("========================================")
+          print("REPAIR COMPLETE")
+          print("========================================")
           PY
 
-          echo ""
-          echo "Checking for remaining debugConfig references:"
-          grep -R "debugConfig" app/build.gradle.kts || true
+      # ==========================================================
+      # 6. Verify Google Services references are gone
+      # ==========================================================
+      - name: Verify Google Services removal
+        shell: bash
+        run: |
+          set -euo pipefail
 
-      # ---------------------------------------------------------
-      # 8. Setup Java 17
-      # ---------------------------------------------------------
+          cd workspace-project
+
+          echo "Searching for invalid Google Services references..."
+
+          FOUND=0
+
+          if grep -Rni \
+            --include="*.gradle" \
+            --include="*.gradle.kts" \
+            --include="*.toml" \
+            --include="*.kt" \
+            "MissingGoogleServicesStrategy" . 2>/dev/null; then
+            FOUND=1
+          fi
+
+          if grep -Rni \
+            --include="*.gradle" \
+            --include="*.gradle.kts" \
+            "googleServices" . 2>/dev/null; then
+            FOUND=1
+          fi
+
+          if grep -Rni \
+            --include="*.gradle" \
+            --include="*.gradle.kts" \
+            'libs.plugins.google.services' . 2>/dev/null; then
+            FOUND=1
+          fi
+
+          if [ "$FOUND" -ne 0 ]; then
+            echo ""
+            echo "ERROR: Google Services references still exist."
+            exit 1
+          fi
+
+          echo "OK: Google Services build configuration removed."
+
+      # ==========================================================
+      # 7. Setup JDK 17
+      # ==========================================================
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      # ---------------------------------------------------------
-      # 9. Setup Gradle 9.3.1
-      # ---------------------------------------------------------
+      # ==========================================================
+      # 8. Setup Gradle 9.3.1
+      # ==========================================================
       - name: Set up Gradle 9.3.1
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "9.3.1"
 
-      # ---------------------------------------------------------
-      # 10. Check Java / Gradle
-      # ---------------------------------------------------------
-      - name: Check build environment
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "===== JAVA ====="
-          java -version
-
-          echo ""
-          echo "===== GRADLE ====="
-          gradle --version
-
-      # ---------------------------------------------------------
-      # 11. Generate Gradle Wrapper
-      # ---------------------------------------------------------
-      - name: Generate Gradle wrapper
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [ ! -f "gradlew" ]; then
-            echo "Gradle wrapper is missing from uploaded ZIP."
-            echo "Generating wrapper using Gradle 9.3.1..."
-
-            gradle wrapper \
-              --gradle-version 9.3.1 \
-              --distribution-type bin
-
-            echo "Gradle wrapper generated."
-          else
-            echo "Gradle wrapper already exists."
-          fi
-
-          chmod +x ./gradlew
-
-          echo ""
-          echo "===== WRAPPER VERSION ====="
-          ./gradlew --version
-
-      # ---------------------------------------------------------
-      # 12. Install Android SDK packages
-      # ---------------------------------------------------------
+      # ==========================================================
+      # 9. Setup Android SDK
+      # ==========================================================
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK components
+      - name: Install Android SDK
         shell: bash
         run: |
           set -euo pipefail
 
-          yes | sdkmanager --licenses >/dev/null || true
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
 
           sdkmanager \
             "platform-tools" \
@@ -319,43 +344,70 @@ jobs:
             "build-tools;36.0.0"
 
           echo ""
-          echo "Android SDK components installed."
+          echo "Android SDK ready."
 
-      # ---------------------------------------------------------
-      # 13. Validate Gradle configuration
-      # ---------------------------------------------------------
+      # ==========================================================
+      # 10. Generate Gradle Wrapper
+      # ==========================================================
+      - name: Generate Gradle wrapper
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd workspace-project
+
+          if [ ! -f "gradlew" ]; then
+            echo "Gradle wrapper missing."
+            echo "Generating Gradle 9.3.1 wrapper..."
+
+            gradle wrapper \
+              --gradle-version 9.3.1 \
+              --distribution-type bin
+          fi
+
+          chmod +x gradlew
+
+          echo ""
+          echo "Gradle wrapper:"
+          ./gradlew --version
+
+      # ==========================================================
+      # 11. Validate project
+      # ==========================================================
       - name: Validate Gradle project
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "========================================"
-          echo "GRADLE PROJECTS"
-          echo "========================================"
+          cd workspace-project
 
           ./gradlew projects \
             --no-daemon \
             --stacktrace
 
-      # ---------------------------------------------------------
-      # 14. Clean
-      # ---------------------------------------------------------
-      - name: Clean project
+      # ==========================================================
+      # 12. Clean
+      # ==========================================================
+      - name: Clean
         shell: bash
         run: |
           set -euo pipefail
+
+          cd workspace-project
 
           ./gradlew clean \
             --no-daemon \
             --stacktrace
 
-      # ---------------------------------------------------------
-      # 15. Build Debug APK
-      # ---------------------------------------------------------
+      # ==========================================================
+      # 13. Build APK
+      # ==========================================================
       - name: Build Debug APK
         shell: bash
         run: |
           set -o pipefail
+
+          cd workspace-project
 
           echo "========================================"
           echo "BUILDING DEBUG APK"
@@ -372,38 +424,38 @@ jobs:
 
           echo ""
           echo "========================================"
-          echo "BUILD RESULT"
-          echo "EXIT CODE: $EXIT_CODE"
+          echo "BUILD EXIT CODE: $EXIT_CODE"
           echo "========================================"
 
           if [ "$EXIT_CODE" -ne 0 ]; then
+
             echo ""
             echo "===== WHAT WENT WRONG ====="
-            grep -A 25 -B 5 \
+            grep -A 30 -B 5 \
               "\* What went wrong" \
               gradle-build.log || true
 
             echo ""
             echo "===== CAUSED BY ====="
-            grep -A 25 -B 5 \
+            grep -A 30 -B 5 \
               "Caused by:" \
-              gradle-build.log | head -160 || true
+              gradle-build.log | head -200 || true
 
             echo ""
-            echo "===== FAILED TASK ====="
-            grep -E \
-              "Execution failed for task|FAILED|FAILURE" \
-              gradle-build.log | head -120 || true
-
-            echo ""
-            echo "===== COMMON CONFIGURATION ERRORS ====="
+            echo "===== FAILED TASKS ====="
             grep -Ei \
-              "google-services|keystore|signing|compileSdk|buildTools|Gradle|Kotlin|KSP|resource|manifest" \
-              gradle-build.log | tail -150 || true
+              "Execution failed for task|FAILED|FAILURE" \
+              gradle-build.log | head -150 || true
 
             echo ""
-            echo "===== LAST 200 LINES ====="
-            tail -200 gradle-build.log
+            echo "===== CONFIGURATION ERRORS ====="
+            grep -Ei \
+              "google|firebase|keystore|signing|ksp|kotlin|compileSdk|buildTools|manifest|resource|duplicate|unresolved reference" \
+              gradle-build.log | tail -200 || true
+
+            echo ""
+            echo "===== LAST 250 LINES ====="
+            tail -250 gradle-build.log
 
             exit "$EXIT_CODE"
           fi
@@ -413,45 +465,22 @@ jobs:
           echo "APK BUILD SUCCESSFUL"
           echo "========================================"
 
-      # ---------------------------------------------------------
-      # 16. Locate generated APK
-      # ---------------------------------------------------------
-      - name: Find generated APK
+      # ==========================================================
+      # 14. Locate APK
+      # ==========================================================
+      - name: Find APK
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Searching for generated APK files..."
+          cd workspace-project
+
+          echo "Generated APK files:"
 
           find . \
             -type f \
             -path "*/build/outputs/apk/*/*.apk" \
             -print
-
-          APK_COUNT=$(
-            find . \
-              -type f \
-              -path "*/build/outputs/apk/*/*.apk" \
-              | wc -l
-          )
-
-          if [ "$APK_COUNT" -eq 0 ]; then
-            echo "ERROR: No APK was generated."
-            exit 1
-          fi
-
-          echo ""
-          echo "APK files found: $APK_COUNT"
-
-      # ---------------------------------------------------------
-      # 17. Rename APK to a predictable name
-      # ---------------------------------------------------------
-      - name: Prepare APK artifact
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mkdir -p artifacts
 
           APK_FILE=$(
             find . \
@@ -461,18 +490,44 @@ jobs:
           )
 
           if [ -z "$APK_FILE" ]; then
-            echo "ERROR: Debug APK not found."
+            echo ""
+            echo "ERROR: No debug APK generated."
             exit 1
           fi
 
-          cp "$APK_FILE" "artifacts/APK-Builder-Mobile-debug.apk"
+          echo ""
+          echo "APK:"
+          echo "$APK_FILE"
 
-          echo "APK copied to:"
-          ls -lh "artifacts/APK-Builder-Mobile-debug.apk"
+      # ==========================================================
+      # 15. Prepare artifact
+      # ==========================================================
+      - name: Prepare APK
+        shell: bash
+        run: |
+          set -euo pipefail
 
-      # ---------------------------------------------------------
-      # 18. Upload APK
-      # ---------------------------------------------------------
+          cd workspace-project
+
+          mkdir -p ../artifacts
+
+          APK_FILE=$(
+            find . \
+              -type f \
+              -path "*/build/outputs/apk/debug/*.apk" \
+              | head -n 1
+          )
+
+          cp "$APK_FILE" \
+            "../artifacts/APK-Builder-Mobile-debug.apk"
+
+          echo ""
+          echo "Final APK:"
+          ls -lh "../artifacts/APK-Builder-Mobile-debug.apk"
+
+      # ==========================================================
+      # 16. Upload APK
+      # ==========================================================
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
@@ -481,14 +536,15 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      # ---------------------------------------------------------
-      # 19. Upload build log if build fails
-      # ---------------------------------------------------------
-      - name: Upload Gradle build log
+      # ==========================================================
+      # 17. Upload logs on failure
+      # ==========================================================
+      - name: Upload Gradle logs
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: Gradle-Build-Log
-          path: gradle-build.log
+          name: Gradle-Build-Logs
+          path: |
+            workspace-project/gradle-build.log
           if-no-files-found: ignore
           retention-days: 7
