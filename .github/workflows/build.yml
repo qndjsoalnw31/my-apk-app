@@ -27,31 +27,49 @@ jobs:
       # ==========================================================
       # 1. Checkout
       # ==========================================================
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       # ==========================================================
-      # 2. Extract the actual uploaded ZIP
+      # 2. Verify ZIP
       # ==========================================================
-      - name: Extract untitled.zip
+      - name: Verify project ZIP
         shell: bash
         run: |
           set -euo pipefail
 
           if [ ! -f "untitled.zip" ]; then
             echo "ERROR: untitled.zip not found"
+
+            echo ""
+            echo "ZIP files available:"
+            find . -type f -iname "*.zip" -print || true
+
             exit 1
           fi
+
+          echo "Found:"
+          ls -lh untitled.zip
+
+      # ==========================================================
+      # 3. Extract ZIP
+      # ==========================================================
+      - name: Extract project
+        shell: bash
+        run: |
+          set -euo pipefail
 
           rm -rf extracted
           mkdir -p extracted
 
-          unzip -q -o "untitled.zip" -d extracted
+          unzip -q -o untitled.zip -d extracted
+
+          echo "ZIP extracted."
 
       # ==========================================================
-      # 3. Locate Android project
+      # 4. Find Android project
       # ==========================================================
-      - name: Locate Android project
+      - name: Find Android project
         shell: bash
         run: |
           set -euo pipefail
@@ -68,7 +86,10 @@ jobs:
           )
 
           if [ -z "$SETTINGS_FILE" ]; then
-            echo "ERROR: Android Gradle project not found"
+            echo "ERROR: Android Gradle project not found."
+
+            find extracted -maxdepth 5 -type f | sort | head -400
+
             exit 1
           fi
 
@@ -83,14 +104,14 @@ jobs:
           cp -a "$PROJECT_DIR"/. project/
 
           if [ ! -f "project/app/build.gradle.kts" ]; then
-            echo "ERROR: app/build.gradle.kts not found"
+            echo "ERROR: project/app/build.gradle.kts not found"
             exit 1
           fi
 
       # ==========================================================
-      # 4. Repair build configuration
+      # 5. FIX APP GRADLE FILE
       # ==========================================================
-      - name: Sanitize build configuration
+      - name: Repair app build.gradle.kts
         shell: bash
         run: |
           set -euo pipefail
@@ -99,115 +120,340 @@ jobs:
           from pathlib import Path
           import re
 
-          files = [
-              Path("project/build.gradle.kts"),
-              Path("project/app/build.gradle.kts"),
-          ]
+          path = Path("project/app/build.gradle.kts")
 
-          for path in files:
-              if not path.exists():
+          if not path.exists():
+              raise SystemExit(
+                  "ERROR: app/build.gradle.kts does not exist"
+              )
+
+          text = path.read_text(encoding="utf-8")
+
+          print("========================================")
+          print("ORIGINAL app/build.gradle.kts")
+          print("========================================")
+          print(text)
+
+          # ------------------------------------------------------
+          # Remove Google Services import
+          # ------------------------------------------------------
+          text = re.sub(
+              r'^[ \t]*import[ \t]+com\.google\.gms\..*$\n?',
+              '',
+              text,
+              flags=re.MULTILINE
+          )
+
+          # ------------------------------------------------------
+          # Remove Google Services plugin alias
+          # ------------------------------------------------------
+          text = re.sub(
+              r'^[ \t]*alias\s*\(\s*libs\.plugins\.google\.services\s*\).*$\n?',
+              '',
+              text,
+              flags=re.MULTILINE
+          )
+
+          # ------------------------------------------------------
+          # Remove direct Google Services plugin
+          # ------------------------------------------------------
+          text = re.sub(
+              r'^[ \t]*id\s*\(\s*["\']com\.google\.gms\.google-services["\']\s*\).*$\n?',
+              '',
+              text,
+              flags=re.MULTILINE
+          )
+
+          # ------------------------------------------------------
+          # Remove every direct debugConfig reference.
+          #
+          # This is the exact error from the current build:
+          #
+          # signingConfig =
+          # signingConfigs.getByName("debugConfig")
+          # ------------------------------------------------------
+          text = re.sub(
+              r'^[ \t]*signingConfig[ \t]*=[ \t]*signingConfigs\.getByName\s*\(\s*["\']debugConfig["\']\s*\)[ \t]*$\n?',
+              '',
+              text,
+              flags=re.MULTILINE
+          )
+
+          # ------------------------------------------------------
+          # Also remove references even if formatting differs.
+          # ------------------------------------------------------
+          text = re.sub(
+              r'^[^\n]*debugConfig[^\n]*$\n?',
+              '',
+              text,
+              flags=re.MULTILINE
+          )
+
+          # ------------------------------------------------------
+          # Remove googleServices { ... } using brace counting.
+          # Regex alone is unreliable with nested Kotlin blocks.
+          # ------------------------------------------------------
+          lines = text.splitlines()
+          output = []
+
+          i = 0
+
+          while i < len(lines):
+              line = lines[i]
+
+              if re.search(r'^\s*googleServices\s*\{', line):
+                  brace_count = line.count("{") - line.count("}")
+
+                  i += 1
+
+                  while i < len(lines) and brace_count > 0:
+                      brace_count += (
+                          lines[i].count("{")
+                          - lines[i].count("}")
+                      )
+                      i += 1
+
                   continue
 
-              text = path.read_text(encoding="utf-8")
+              output.append(line)
+              i += 1
 
-              # Remove Google Services imports.
-              text = re.sub(
-                  r'^import com\.google\.gms\..*$\n?',
-                  '',
-                  text,
-                  flags=re.MULTILINE,
-              )
+          text = "\n".join(output) + "\n"
 
-              # Remove Google Services plugin alias.
-              text = re.sub(
-                  r'^\s*alias\(libs\.plugins\.google\.services\).*\n?',
-                  '',
-                  text,
-                  flags=re.MULTILINE,
-              )
+          # ------------------------------------------------------
+          # Remove Google Services strategy references if any
+          # ------------------------------------------------------
+          text = re.sub(
+              r'^[^\n]*MissingGoogleServicesStrategy[^\n]*$\n?',
+              '',
+              text,
+              flags=re.MULTILINE
+          )
 
-              # Remove googleServices { ... } block.
-              text = re.sub(
-                  r'\n?googleServices\s*\{.*?\}\s*\n',
-                  '\n',
-                  text,
-                  flags=re.DOTALL,
-              )
+          text = re.sub(
+              r'^[^\n]*missingGoogleServicesStrategy[^\n]*$\n?',
+              '',
+              text,
+              flags=re.MULTILINE
+          )
 
-              # Remove custom debug signing.
-              text = re.sub(
-                  r'^\s*signingConfig\s*=\s*signingConfigs\.getByName\("debugConfig"\)\s*$\n?',
-                  '',
-                  text,
-                  flags=re.MULTILINE,
-              )
+          # ------------------------------------------------------
+          # Remove custom debug signing block.
+          #
+          # Handles:
+          #
+          # create("debugConfig") {
+          #     ...
+          # }
+          # ------------------------------------------------------
+          lines = text.splitlines()
+          output = []
 
-              text = re.sub(
-                  r'\n\s*create\("debugConfig"\)\s*\{.*?\n\s*\}',
-                  '',
-                  text,
-                  flags=re.DOTALL,
-              )
+          i = 0
 
-              # Use Java 17.
-              text = text.replace(
-                  "sourceCompatibility = JavaVersion.VERSION_11",
-                  "sourceCompatibility = JavaVersion.VERSION_17",
-              )
+          while i < len(lines):
+              line = lines[i]
 
-              text = text.replace(
-                  "targetCompatibility = JavaVersion.VERSION_11",
-                  "targetCompatibility = JavaVersion.VERSION_17",
-              )
+              if re.search(
+                  r'^\s*create\s*\(\s*["\']debugConfig["\']\s*\)\s*\{',
+                  line
+              ):
+                  brace_count = line.count("{") - line.count("}")
 
-              path.write_text(text, encoding="utf-8")
+                  i += 1
 
-          # Remove Google Services entries from version catalog.
-          catalog = Path("project/gradle/libs.versions.toml")
+                  while i < len(lines) and brace_count > 0:
+                      brace_count += (
+                          lines[i].count("{")
+                          - lines[i].count("}")
+                      )
+                      i += 1
 
-          if catalog.exists():
-              text = catalog.read_text(encoding="utf-8")
+                  continue
 
-              text = re.sub(
-                  r'^googleServices\s*=.*\n?',
-                  '',
-                  text,
-                  flags=re.MULTILINE,
-              )
+              output.append(line)
+              i += 1
 
-              text = re.sub(
-                  r'^google-services\s*=.*\n?',
-                  '',
-                  text,
-                  flags=re.MULTILINE,
-              )
+          text = "\n".join(output) + "\n"
 
-              catalog.write_text(text, encoding="utf-8")
+          path.write_text(
+              text,
+              encoding="utf-8"
+          )
 
-          # Remove obsolete Google Services passthrough.
-          properties = Path("project/gradle.properties")
-
-          if properties.exists():
-              text = properties.read_text(encoding="utf-8")
-
-              text = re.sub(
-                  r'^googleServices\.missing\.passthrough=.*\n?',
-                  '',
-                  text,
-                  flags=re.MULTILINE,
-              )
-
-              properties.write_text(text, encoding="utf-8")
-
-          # Delete any Firebase JSON configuration.
-          for file in Path("project").rglob("google-services.json"):
-              file.unlink()
-
-          print("Build configuration sanitized successfully.")
+          print("========================================")
+          print("REPAIRED app/build.gradle.kts")
+          print("========================================")
+          print(text)
           PY
 
       # ==========================================================
-      # 5. JDK 17
+      # 6. Remove Google Services from root configuration
+      # ==========================================================
+      - name: Repair root Gradle files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          files = []
+
+          root = Path("project/build.gradle.kts")
+          if root.exists():
+              files.append(root)
+
+          root_groovy = Path("project/build.gradle")
+          if root_groovy.exists():
+              files.append(root_groovy)
+
+          for path in files:
+              text = path.read_text(encoding="utf-8")
+
+              text = re.sub(
+                  r'^[ \t]*alias\s*\(\s*libs\.plugins\.google\.services\s*\).*$\n?',
+                  '',
+                  text,
+                  flags=re.MULTILINE
+              )
+
+              text = re.sub(
+                  r'^[ \t]*id\s*\(\s*["\']com\.google\.gms\.google-services["\']\s*\).*$\n?',
+                  '',
+                  text,
+                  flags=re.MULTILINE
+              )
+
+              path.write_text(
+                  text,
+                  encoding="utf-8"
+              )
+
+              print(f"Repaired {path}")
+
+          # ------------------------------------------------------
+          # Remove Google Services from version catalog
+          # ------------------------------------------------------
+          catalog = Path("project/gradle/libs.versions.toml")
+
+          if catalog.exists():
+              text = catalog.read_text(
+                  encoding="utf-8"
+              )
+
+              text = re.sub(
+                  r'^.*google-services.*$\n?',
+                  '',
+                  text,
+                  flags=re.MULTILINE
+              )
+
+              text = re.sub(
+                  r'^.*googleServices.*$\n?',
+                  '',
+                  text,
+                  flags=re.MULTILINE
+              )
+
+              catalog.write_text(
+                  text,
+                  encoding="utf-8"
+              )
+
+              print("Repaired libs.versions.toml")
+
+      # ==========================================================
+      # 7. Remove Google Services JSON
+      # ==========================================================
+      - name: Remove Firebase configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          find project \
+            -type f \
+            -name "google-services.json" \
+            -delete \
+            || true
+
+          echo "google-services.json removed if present."
+
+      # ==========================================================
+      # 8. FINAL validation BEFORE Gradle
+      # ==========================================================
+      - name: Validate repaired source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "========================================"
+          echo "VALIDATING PROJECT"
+          echo "========================================"
+
+          echo ""
+          echo "Searching for debugConfig..."
+
+          if grep -Rni \
+            --include="*.gradle" \
+            --include="*.gradle.kts" \
+            "debugConfig" \
+            project 2>/dev/null; then
+
+            echo ""
+            echo "ERROR: debugConfig still exists."
+            echo "Build stopped before Gradle."
+            exit 1
+          fi
+
+          echo "OK: debugConfig does not exist."
+
+          echo ""
+          echo "Searching for Google Services..."
+
+          if grep -Rni \
+            --include="*.gradle" \
+            --include="*.gradle.kts" \
+            "google-services" \
+            project 2>/dev/null; then
+
+            echo ""
+            echo "ERROR: Google Services plugin reference remains."
+            exit 1
+          fi
+
+          if grep -Rni \
+            --include="*.gradle" \
+            --include="*.gradle.kts" \
+            "googleServices" \
+            project 2>/dev/null; then
+
+            echo ""
+            echo "ERROR: googleServices block/reference remains."
+            exit 1
+          fi
+
+          echo "OK: Google Services build configuration removed."
+
+          echo ""
+          echo "Searching for Firebase missing strategy..."
+
+          if grep -Rni \
+            --include="*.gradle" \
+            --include="*.gradle.kts" \
+            "MissingGoogleServicesStrategy" \
+            project 2>/dev/null; then
+
+            echo ""
+            echo "ERROR: MissingGoogleServicesStrategy remains."
+            exit 1
+          fi
+
+          echo "OK."
+
+      # ==========================================================
+      # 9. Java 17
       # ==========================================================
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -216,7 +462,7 @@ jobs:
           java-version: "17"
 
       # ==========================================================
-      # 6. Gradle 9.3.1
+      # 10. Gradle 9.3.1
       # ==========================================================
       - name: Set up Gradle 9.3.1
         uses: gradle/actions/setup-gradle@v4
@@ -224,12 +470,12 @@ jobs:
           gradle-version: "9.3.1"
 
       # ==========================================================
-      # 7. Android SDK
+      # 11. Android SDK
       # ==========================================================
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK packages
+      - name: Install Android SDK components
         shell: bash
         run: |
           set -euo pipefail
@@ -242,7 +488,7 @@ jobs:
             "build-tools;36.0.0"
 
       # ==========================================================
-      # 8. Gradle Wrapper
+      # 12. Create Gradle Wrapper
       # ==========================================================
       - name: Generate Gradle wrapper
         working-directory: project
@@ -261,9 +507,9 @@ jobs:
           ./gradlew --version
 
       # ==========================================================
-      # 9. Validate configuration
+      # 13. Gradle configuration test
       # ==========================================================
-      - name: Validate project configuration
+      - name: Test Gradle configuration
         working-directory: project
         shell: bash
         run: |
@@ -276,9 +522,9 @@ jobs:
             --warning-mode all
 
       # ==========================================================
-      # 10. Compile Kotlin separately
+      # 14. Kotlin compilation
       # ==========================================================
-      - name: Compile Kotlin only
+      - name: Compile Kotlin
         working-directory: project
         shell: bash
         run: |
@@ -297,23 +543,27 @@ jobs:
 
             echo ""
             echo "========================================"
-            echo "FIRST KOTLIN ERRORS"
+            echo "KOTLIN ERRORS"
             echo "========================================"
 
-            grep -nE \
+            grep -E \
               '(^e: |error: |Unresolved reference|Type mismatch|Expecting |Cannot access|Overload resolution ambiguity)' \
               kotlin-compile.log \
-              | head -120 || true
+              | head -150 \
+              || true
 
             echo ""
             echo "========================================"
-            echo "KOTLIN ERROR CONTEXT"
+            echo "ERROR CONTEXT"
             echo "========================================"
 
-            grep -n -B 3 -A 8 \
+            grep -n \
+              -B 3 \
+              -A 8 \
               '^e: ' \
               kotlin-compile.log \
-              | head -240 || true
+              | head -250 \
+              || true
 
             exit "$EXIT_CODE"
           fi
@@ -321,13 +571,17 @@ jobs:
           echo "Kotlin compilation successful."
 
       # ==========================================================
-      # 11. Build APK
+      # 15. Build APK
       # ==========================================================
       - name: Build Debug APK
         working-directory: project
         shell: bash
         run: |
           set -o pipefail
+
+          echo "========================================"
+          echo "BUILDING APK"
+          echo "========================================"
 
           ./gradlew \
             :app:assembleDebug \
@@ -342,31 +596,57 @@ jobs:
 
             echo ""
             echo "========================================"
-            echo "BUILD ERROR SUMMARY"
+            echo "BUILD FAILURE SUMMARY"
             echo "========================================"
 
-            grep -nE \
-              '(^e: |error: |Execution failed for task|What went wrong|Caused by:|FAILED)' \
+            grep -E \
+              'Execution failed for task|(^e: )|error: |What went wrong|Caused by:|FAILED|FAILURE' \
               build.log \
-              | head -160 || true
+              | head -200 \
+              || true
 
             echo ""
             echo "========================================"
-            echo "LAST 200 LINES"
+            echo "LAST 250 LINES"
             echo "========================================"
 
-            tail -200 build.log
+            tail -250 build.log
 
             exit "$EXIT_CODE"
           fi
 
           echo ""
+          echo "========================================"
           echo "APK BUILD SUCCESSFUL"
+          echo "========================================"
 
       # ==========================================================
-      # 12. Prepare APK
+      # 16. Find APK
       # ==========================================================
-      - name: Prepare APK
+      - name: Find APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK=$(
+            find project/app/build/outputs/apk/debug \
+              -type f \
+              -name "*.apk" \
+              -print -quit
+          )
+
+          if [ -z "$APK" ]; then
+            echo "ERROR: APK was not generated."
+            exit 1
+          fi
+
+          echo "APK found:"
+          echo "$APK"
+
+      # ==========================================================
+      # 17. Prepare APK
+      # ==========================================================
+      - name: Prepare APK artifact
         shell: bash
         run: |
           set -euo pipefail
@@ -380,11 +660,6 @@ jobs:
               -print -quit
           )
 
-          if [ -z "$APK" ]; then
-            echo "ERROR: APK not found"
-            exit 1
-          fi
-
           cp "$APK" \
             artifacts/APK-Builder-Mobile-debug.apk
 
@@ -392,7 +667,7 @@ jobs:
             artifacts/APK-Builder-Mobile-debug.apk
 
       # ==========================================================
-      # 13. Upload APK
+      # 18. Upload APK
       # ==========================================================
       - name: Upload APK
         uses: actions/upload-artifact@v4
@@ -403,9 +678,9 @@ jobs:
           retention-days: 7
 
       # ==========================================================
-      # 14. Upload diagnostics if anything fails
+      # 19. Upload logs if failed
       # ==========================================================
-      - name: Upload build diagnostics
+      - name: Upload diagnostics
         if: failure()
         uses: actions/upload-artifact@v4
         with:
