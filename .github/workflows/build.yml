@@ -1,1065 +1,267 @@
-herename: Build Android APK
+name: Build Substack Downloader APK
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
       - master
-  workflow_dispatch:
-
-permissions:
-  contents: read
 
 jobs:
   build:
-    name: Build APK
     runs-on: ubuntu-latest
 
-    env:
-      CI: true
-      GRADLE_OPTS: >-
-        -Xmx4g
-        -XX:MaxMetaspaceSize=1g
-        -Dfile.encoding=UTF-8
-
     steps:
-
-      # ==========================================================
-      # 1. Checkout
-      # ==========================================================
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      # ==========================================================
-      # 2. Verify ZIP
-      # ==========================================================
-      - name: Verify ZIP
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept Android SDK licenses
+        run: yes | sdkmanager --licenses || true
+
+      - name: Install Android SDK packages
+        run: |
+          sdkmanager "platform-tools"
+          sdkmanager "platforms;android-36"
+          sdkmanager "build-tools;36.0.0"
+
+      - name: Extract ZIP if necessary
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
-          if [ ! -f "untitled.zip" ]; then
-            echo "ERROR: untitled.zip not found"
-            echo ""
-            echo "Available ZIP files:"
-            find . -type f -iname "*.zip" -print || true
+          if ls *.zip >/dev/null 2>&1; then
+            ZIP_FILE=$(ls *.zip | head -n 1)
+            echo "Found ZIP: $ZIP_FILE"
+
+            mkdir -p extracted
+            unzip -o "$ZIP_FILE" -d extracted
+
+            echo "Extracted files:"
+            find extracted -maxdepth 3 -type f | head -100
+          fi
+
+      - name: Locate Android project
+        shell: bash
+        run: |
+          set -e
+
+          PROJECT_DIR=""
+
+          if [ -f "gradlew" ]; then
+            PROJECT_DIR="."
+          elif [ -f "extracted/gradlew" ]; then
+            PROJECT_DIR="extracted"
+          else
+            FOUND=$(find . -type f -name gradlew -not -path "./.git/*" | head -n 1 || true)
+
+            if [ -n "$FOUND" ]; then
+              PROJECT_DIR=$(dirname "$FOUND")
+            fi
+          fi
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "ERROR: No Gradle Android project found."
+            find . -maxdepth 4 -type f | sort | head -200
             exit 1
           fi
 
-          echo "ZIP found:"
-          ls -lh untitled.zip
+          PROJECT_DIR=$(realpath "$PROJECT_DIR")
 
-      # ==========================================================
-      # 3. Extract project
-      # ==========================================================
-      - name: Extract project
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          rm -rf extracted project
-          mkdir -p extracted project
-
-          unzip -q -o untitled.zip -d extracted
-
-          echo "ZIP extracted successfully."
-
-      # ==========================================================
-      # 4. Find Android project
-      # ==========================================================
-      - name: Find Android project
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          SETTINGS_FILE=$(
-            find extracted \
-              -type f \
-              \( \
-                -name "settings.gradle.kts" \
-                -o \
-                -name "settings.gradle" \
-              \) \
-              -print -quit
-          )
-
-          if [ -z "$SETTINGS_FILE" ]; then
-            echo "ERROR: Android Gradle project not found."
-            find extracted -maxdepth 6 -type f | sort | head -500
-            exit 1
-          fi
-
-          PROJECT_DIR="$(dirname "$SETTINGS_FILE")"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
           echo "Android project:"
           echo "$PROJECT_DIR"
 
-          cp -a "$PROJECT_DIR"/. project/
+          find "$PROJECT_DIR" -maxdepth 2 -type f | sort
 
-          if [ ! -f "project/app/build.gradle.kts" ]; then
-            echo "ERROR: project/app/build.gradle.kts not found"
-            exit 1
-          fi
-
-      # ==========================================================
-      # 5. Repair app/build.gradle.kts
-      # ==========================================================
-      - name: Repair app Gradle Kotlin DSL
+      - name: Move Gradle wrapper to project root
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
-          python3 <<'PY'
-          from pathlib import Path
-          import re
-          import unicodedata
-
-          path = Path("project/app/build.gradle.kts")
-
-          if not path.exists():
-              raise SystemExit("ERROR: app/build.gradle.kts not found")
-
-          text = path.read_text(
-              encoding="utf-8",
-              errors="replace"
-          )
-
-          # ------------------------------------------------------
-          # Normalize BOM / Unicode / invisible characters
-          # ------------------------------------------------------
-          text = text.replace("\ufeff", "")
-          text = unicodedata.normalize("NFKC", text)
-
-          for ch in [
-              "\u00a0", "\u1680", "\u180e",
-              "\u2000", "\u2001", "\u2002", "\u2003",
-              "\u2004", "\u2005", "\u2006", "\u2007",
-              "\u2008", "\u2009", "\u200a",
-              "\u202f", "\u205f", "\u3000"
-          ]:
-              text = text.replace(ch, " ")
-
-          for ch in [
-              "\u200b", "\u200c", "\u200d",
-              "\u2060", "\ufeff"
-          ]:
-              text = text.replace(ch, "")
-
-          # Smart quotes -> normal quotes.
-          replacements = {
-              "“": '"',
-              "”": '"',
-              "„": '"',
-              "‟": '"',
-              "‘": "'",
-              "’": "'",
-              "‚": "'",
-              "‛": "'",
-              "＂": '"',
-              "＇": "'",
-          }
-
-          for old, new in replacements.items():
-              text = text.replace(old, new)
-
-          text = text.replace('\\"', '"')
-          text = text.replace("\\'", "'")
-
-          # ------------------------------------------------------
-          # Fix dependency function syntax.
-          #
-          # "ksp"(...) -> ksp(...)
-          # "implementation"(...) -> implementation(...)
-          # ------------------------------------------------------
-          dependency_functions = [
-              "implementation",
-              "api",
-              "compileOnly",
-              "runtimeOnly",
-              "testImplementation",
-              "testRuntimeOnly",
-              "androidTestImplementation",
-              "debugImplementation",
-              "releaseImplementation",
-              "debugApi",
-              "releaseApi",
-              "debugCompileOnly",
-              "releaseCompileOnly",
-              "debugRuntimeOnly",
-              "releaseRuntimeOnly",
-              "ksp",
-              "kapt",
-              "annotationProcessor",
-          ]
-
-          for function in dependency_functions:
-
-              text = re.sub(
-                  rf'["\']{re.escape(function)}["\']\s*\(',
-                  f"{function}(",
-                  text
-              )
-
-              text = re.sub(
-                  rf'`{re.escape(function)}`\s*\(',
-                  f"{function}(",
-                  text
-              )
-
-              text = re.sub(
-                  rf'\b{re.escape(function)}\s+\(',
-                  f"{function}(",
-                  text
-              )
-
-          # ------------------------------------------------------
-          # Remove Google Services references
-          # ------------------------------------------------------
-          text = re.sub(
-              r'^[ \t]*import[ \t]+com\.google\.gms\..*$\n?',
-              '',
-              text,
-              flags=re.MULTILINE
-          )
-
-          text = re.sub(
-              r'^[ \t]*alias\s*\(\s*libs\.plugins\.google\.services\s*\).*$\n?',
-              '',
-              text,
-              flags=re.MULTILINE
-          )
-
-          text = re.sub(
-              r'^[ \t]*id\s*\(\s*["\']com\.google\.gms\.google-services["\']\s*\).*$\n?',
-              '',
-              text,
-              flags=re.MULTILINE
-          )
-
-          text = re.sub(
-              r'^[^\n]*(MissingGoogleServicesStrategy|missingGoogleServicesStrategy)[^\n]*$\n?',
-              '',
-              text,
-              flags=re.MULTILINE
-          )
-
-          # ------------------------------------------------------
-          # Remove debugConfig references
-          # ------------------------------------------------------
-          text = re.sub(
-              r'^[^\n]*signingConfigs\.getByName\s*\(\s*["\']debugConfig["\']\s*\)[^\n]*$\n?',
-              '',
-              text,
-              flags=re.MULTILINE
-          )
-
-          # ------------------------------------------------------
-          # Kotlin-aware brace matcher.
-          #
-          # States:
-          # code
-          # line_comment
-          # block_comment
-          # double_string
-          # triple_string
-          # char
-          # ------------------------------------------------------
-          def find_matching_brace(source, opening_index):
-              depth = 0
-              i = opening_index
-              n = len(source)
-              state = "code"
-
-              while i < n:
-                  ch = source[i]
-                  nxt = source[i + 1] if i + 1 < n else ""
-
-                  if state == "code":
-
-                      if ch == "/" and nxt == "/":
-                          state = "line_comment"
-                          i += 2
-                          continue
-
-                      if ch == "/" and nxt == "*":
-                          state = "block_comment"
-                          i += 2
-                          continue
-
-                      if source[i:i+3] == '"""':
-                          state = "triple_string"
-                          i += 3
-                          continue
-
-                      if ch == '"':
-                          state = "double_string"
-                          i += 1
-                          continue
-
-                      if ch == "'":
-                          state = "char"
-                          i += 1
-                          continue
-
-                      if ch == "{":
-                          depth += 1
-
-                      elif ch == "}":
-                          depth -= 1
-
-                          if depth == 0:
-                              return i
-
-                      i += 1
-                      continue
-
-                  if state == "line_comment":
-
-                      if ch == "\n":
-                          state = "code"
-
-                      i += 1
-                      continue
-
-                  if state == "block_comment":
-
-                      if ch == "*" and nxt == "/":
-                          state = "code"
-                          i += 2
-                          continue
-
-                      i += 1
-                      continue
-
-                  if state == "triple_string":
-
-                      if source[i:i+3] == '"""':
-                          state = "code"
-                          i += 3
-                          continue
-
-                      i += 1
-                      continue
-
-                  if state == "double_string":
-
-                      if ch == "\\":
-                          i += 2
-                          continue
-
-                      if ch == '"':
-                          state = "code"
-
-                      i += 1
-                      continue
-
-                  if state == "char":
-
-                      if ch == "\\":
-                          i += 2
-                          continue
-
-                      if ch == "'":
-                          state = "code"
-
-                      i += 1
-                      continue
-
-              return None
-
-          # ------------------------------------------------------
-          # Remove a named Kotlin block.
-          # ------------------------------------------------------
-          def remove_named_block(source, name):
-              pattern = re.compile(
-                  rf'(?m)^[ \t]*{re.escape(name)}\s*\{{'
-              )
-
-              while True:
-
-                  match = pattern.search(source)
-
-                  if not match:
-                      return source
-
-                  opening = source.find(
-                      "{",
-                      match.start()
-                  )
-
-                  closing = find_matching_brace(
-                      source,
-                      opening
-                  )
-
-                  if closing is None:
-                      return source
-
-                  source = (
-                      source[:match.start()]
-                      + source[closing + 1:]
-                  )
-
-          text = remove_named_block(
-              text,
-              "googleServices"
-          )
-
-          # Debug signing block.
-          debug_pattern = re.compile(
-              r'(?m)^[ \t]*create\s*\(\s*["\']debugConfig["\']\s*\)\s*\{'
-          )
-
-          while True:
-
-              match = debug_pattern.search(text)
-
-              if not match:
-                  break
-
-              opening = text.find(
-                  "{",
-                  match.start()
-              )
-
-              closing = find_matching_brace(
-                  text,
-                  opening
-              )
-
-              if closing is None:
-                  break
-
-              text = (
-                  text[:match.start()]
-                  + text[closing + 1:]
-              )
-
-          # ------------------------------------------------------
-          # Repair dependencies block.
-          # ------------------------------------------------------
-          dep_match = re.search(
-              r'(?m)^[ \t]*dependencies\s*\{',
-              text
-          )
-
-          if dep_match:
-
-              opening = text.find(
-                  "{",
-                  dep_match.start()
-              )
-
-              closing = find_matching_brace(
-                  text,
-                  opening
-              )
-
-              if closing is not None:
-
-                  old_dependencies = text[
-                      opening + 1:
-                      closing
-                  ]
-
-                  recovered = []
-
-                  dependency_pattern = re.compile(
-                      r'(?m)^[ \t]*('
-                      + "|".join(
-                          map(re.escape, dependency_functions)
-                      )
-                      + r')\s*\((.*?)\)\s*$'
-                  )
-
-                  for match in dependency_pattern.finditer(
-                      old_dependencies
-                  ):
-                      function = match.group(1)
-                      argument = match.group(2).strip()
-
-                      if not argument:
-                          continue
-
-                      if "\n" in argument:
-                          continue
-
-                      item = (
-                          function,
-                          argument
-                      )
-
-                      if item not in recovered:
-                          recovered.append(item)
-
-                  if recovered:
-
-                      new_lines = [
-                          "dependencies {"
-                      ]
-
-                      for function, argument in recovered:
-                          new_lines.append(
-                              f"    {function}({argument})"
-                          )
-
-                      new_lines.append("}")
-
-                      new_block = "\n".join(
-                          new_lines
-                      )
-
-                      text = (
-                          text[:dep_match.start()]
-                          + new_block
-                          + text[closing + 1:]
-                      )
-
-                      print(
-                          "Recovered dependency entries:",
-                          len(recovered)
-                      )
-
-          # ------------------------------------------------------
-          # Normalize newlines.
-          # ------------------------------------------------------
-          text = text.replace("\r\n", "\n")
-          text = text.replace("\r", "\n")
-          text = re.sub(r"\n{4,}", "\n\n", text)
-
-          path.write_text(
-              text,
-              encoding="utf-8",
-              newline="\n"
-          )
-
-          print(
-              "app/build.gradle.kts repaired."
-          )
-          PY
-
-      # ==========================================================
-      # 6. Repair root Gradle files
-      # ==========================================================
-      - name: Repair root Gradle files
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          python3 <<'PY'
-          from pathlib import Path
-          import re
-          import unicodedata
-
-          for filename in (
-              "project/build.gradle.kts",
-              "project/build.gradle",
-          ):
-
-              path = Path(filename)
-
-              if not path.exists():
-                  continue
-
-              text = path.read_text(
-                  encoding="utf-8",
-                  errors="replace"
-              )
-
-              text = text.replace("\ufeff", "")
-              text = unicodedata.normalize(
-                  "NFKC",
-                  text
-              )
-
-              for old, new in {
-                  "“": '"',
-                  "”": '"',
-                  "„": '"',
-                  "‘": "'",
-                  "’": "'",
-                  "\u00a0": " ",
-                  "\u200b": "",
-                  "\u200c": "",
-                  "\u200d": "",
-                  "\u2060": "",
-              }.items():
-                  text = text.replace(old, new)
-
-              text = re.sub(
-                  r'^[^\n]*(google-services|googleServices)[^\n]*$\n?',
-                  '',
-                  text,
-                  flags=re.MULTILINE
-              )
-
-              path.write_text(
-                  text,
-                  encoding="utf-8",
-                  newline="\n"
-              )
-
-              print(
-                  f"Repaired {path}"
-              )
-          PY
-
-      # ==========================================================
-      # 7. Normalize Version Catalog
-      # ==========================================================
-      - name: Normalize libs.versions.toml
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [ ! -f "project/gradle/libs.versions.toml" ]; then
-            echo "libs.versions.toml not found."
-            exit 0
-          fi
-
-          python3 <<'PY'
-          from pathlib import Path
-          import unicodedata
-
-          path = Path(
-              "project/gradle/libs.versions.toml"
-          )
-
-          text = path.read_text(
-              encoding="utf-8",
-              errors="replace"
-          )
-
-          text = text.replace("\ufeff", "")
-          text = unicodedata.normalize(
-              "NFKC",
-              text
-          )
-
-          replacements = {
-              "“": '"',
-              "”": '"',
-              "„": '"',
-              "‘": "'",
-              "’": "'",
-              "\u00a0": " ",
-              "\u200b": "",
-              "\u200c": "",
-              "\u200d": "",
-              "\u2060": "",
-          }
-
-          for old, new in replacements.items():
-              text = text.replace(old, new)
-
-          path.write_text(
-              text,
-              encoding="utf-8",
-              newline="\n"
-          )
-
-          print(
-              "Version catalog normalized."
-          )
-          PY
-
-      # ==========================================================
-      # 8. Remove Google Services JSON
-      # ==========================================================
-      - name: Remove Google Services JSON
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          find project \
-            -type f \
-            -name "google-services.json" \
-            -delete \
-            || true
-
-      # ==========================================================
-      # 9. Validate Gradle source
-      # ==========================================================
-      - name: Validate Gradle source
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          python3 <<'PY'
-          from pathlib import Path
-          import re
-
-          def validate_braces(text):
-              depth = 0
-              i = 0
-              n = len(text)
-              state = "code"
-
-              while i < n:
-
-                  ch = text[i]
-                  nxt = (
-                      text[i + 1]
-                      if i + 1 < n
-                      else ""
-                  )
-
-                  if state == "code":
-
-                      if ch == "/" and nxt == "/":
-                          state = "line_comment"
-                          i += 2
-                          continue
-
-                      if ch == "/" and nxt == "*":
-                          state = "block_comment"
-                          i += 2
-                          continue
-
-                      if text[i:i+3] == '"""':
-                          state = "triple_string"
-                          i += 3
-                          continue
-
-                      if ch == '"':
-                          state = "double_string"
-                          i += 1
-                          continue
-
-                      if ch == "'":
-                          state = "char"
-                          i += 1
-                          continue
-
-                      if ch == "{":
-                          depth += 1
-
-                      elif ch == "}":
-
-                          if depth == 0:
-                              return False, (
-                                  "closing brace without "
-                                  "matching opening brace"
-                              )
-
-                          depth -= 1
-
-                      i += 1
-                      continue
-
-                  if state == "line_comment":
-
-                      if ch == "\n":
-                          state = "code"
-
-                      i += 1
-                      continue
-
-                  if state == "block_comment":
-
-                      if ch == "*" and nxt == "/":
-                          state = "code"
-                          i += 2
-                          continue
-
-                      i += 1
-                      continue
-
-                  if state == "triple_string":
-
-                      if text[i:i+3] == '"""':
-                          state = "code"
-                          i += 3
-                          continue
-
-                      i += 1
-                      continue
-
-                  if state == "double_string":
-
-                      if ch == "\\":
-                          i += 2
-                          continue
-
-                      if ch == '"':
-                          state = "code"
-
-                      i += 1
-                      continue
-
-                  if state == "char":
-
-                      if ch == "\\":
-                          i += 2
-                          continue
-
-                      if ch == "'":
-                          state = "code"
-
-                      i += 1
-                      continue
-
-              if depth != 0:
-                  return False, (
-                      f"unclosed opening brace "
-                      f"(depth={depth})"
-                  )
-
-              return True, "OK"
-
-          files = list(
-              Path("project").rglob("*.gradle.kts")
-          )
-
-          files += list(
-              Path("project").rglob("*.gradle")
-          )
-
-          for path in files:
-
-              text = path.read_text(
-                  encoding="utf-8",
-                  errors="replace"
-              )
-
-              valid, message = validate_braces(
-                  text
-              )
-
-              if not valid:
-                  print(
-                      f"ERROR: {path}: {message}"
-                  )
-                  raise SystemExit(1)
-
-              print(
-                  f"OK: {path}"
-              )
-
-          app = Path(
-              "project/app/build.gradle.kts"
-          )
-
-          text = app.read_text(
-              encoding="utf-8"
-          )
-
-          forbidden = (
-              "debugConfig",
-              "MissingGoogleServicesStrategy",
-              "missingGoogleServicesStrategy",
-              "libs.plugins.google.services",
-          )
-
-          for value in forbidden:
-
-              if value in text:
-                  raise SystemExit(
-                      f"ERROR: forbidden reference remains: {value}"
-                  )
-
-          bad_dependency = re.compile(
-              r'["\']'
-              r'(implementation|api|compileOnly|runtimeOnly|'
-              r'testImplementation|testRuntimeOnly|'
-              r'androidTestImplementation|debugImplementation|'
-              r'releaseImplementation|ksp|kapt|annotationProcessor)'
-              r'["\']\s*\('
-          )
-
-          if bad_dependency.search(text):
-              raise SystemExit(
-                  "ERROR: quoted dependency function remains."
-              )
-
-          print(
-              "Gradle source validation passed."
-          )
-          PY
-
-      # ==========================================================
-      # 10. Setup JDK 17
-      # ==========================================================
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      # ==========================================================
-      # 11. Setup Gradle 9.3.1
-      # ==========================================================
-      - name: Set up Gradle 9.3.1
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "9.3.1"
-
-      # ==========================================================
-      # 12. Setup Android SDK
-      # ==========================================================
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK components
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          yes | sdkmanager --licenses \
-            >/dev/null 2>&1 || true
-
-          sdkmanager \
-            "platform-tools" \
-            "platforms;android-36" \
-            "build-tools;36.0.0"
-
-      # ==========================================================
-      # 13. Generate Gradle Wrapper
-      # ==========================================================
-      - name: Generate Gradle wrapper
-        working-directory: project
-        shell: bash
-        run: |
-          set -euo pipefail
+          cd "$PROJECT_DIR"
 
           if [ ! -f "gradlew" ]; then
-            gradle wrapper \
-              --gradle-version 9.3.1 \
-              --distribution-type bin
+            WRAPPER=$(find . -type f -name gradlew | head -n 1 || true)
+
+            if [ -n "$WRAPPER" ]; then
+              WRAPPER_DIR=$(dirname "$WRAPPER")
+
+              cp "$WRAPPER_DIR/gradlew" ./gradlew
+
+              if [ -f "$WRAPPER_DIR/gradle/wrapper/gradle-wrapper.properties" ]; then
+                mkdir -p gradle/wrapper
+                cp "$WRAPPER_DIR/gradle/wrapper/"* gradle/wrapper/
+              fi
+            fi
           fi
+
+          if [ -f "gradlew" ]; then
+            chmod +x gradlew
+          fi
+
+      - name: Repair Gradle version
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          mkdir -p gradle/wrapper
+
+          cat > gradle/wrapper/gradle-wrapper.properties <<'EOF'
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-9.3.1-bin.zip
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          EOF
+
+          echo "Gradle wrapper configured for 9.3.1"
+
+      - name: Remove Google Services dependency
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          echo "Searching Gradle files..."
+
+          find . -type f \( \
+            -name "build.gradle" \
+            -o -name "build.gradle.kts" \
+            \) \
+            -not -path "./.gradle/*" \
+            -print
+
+          while IFS= read -r FILE; do
+            echo "Repairing: $FILE"
+
+            sed -i \
+              '/com\.google\.gms\.google-services/d' \
+              "$FILE" || true
+
+            sed -i \
+              '/apply plugin:.*google-services/d' \
+              "$FILE" || true
+
+            sed -i \
+              '/id[[:space:]]*(\?"com\.google\.gms\.google-services"\?)/d' \
+              "$FILE" || true
+
+          done < <(
+            find . -type f \
+              \( -name "build.gradle" -o -name "build.gradle.kts" \) \
+              -not -path "./.gradle/*"
+          )
+
+      - name: Remove google-services.json
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+
+          find . -type f \
+            -name "google-services.json" \
+            -not -path "./.gradle/*" \
+            -delete || true
+
+          echo "google-services.json removed if present."
+
+      - name: Check Android project
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+
+          echo "===== SETTINGS ====="
+          [ -f settings.gradle ] && cat settings.gradle || true
+          [ -f settings.gradle.kts ] && cat settings.gradle.kts || true
+
+          echo "===== ROOT BUILD ====="
+          [ -f build.gradle ] && cat build.gradle || true
+          [ -f build.gradle.kts ] && cat build.gradle.kts || true
+
+          echo "===== APP BUILD ====="
+          [ -f app/build.gradle ] && cat app/build.gradle || true
+          [ -f app/build.gradle.kts ] && cat app/build.gradle.kts || true
+
+      - name: Generate Gradle wrapper if missing
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          if [ ! -f "gradlew" ]; then
+            echo "Gradle wrapper missing."
+
+            curl -L \
+              https://services.gradle.org/distributions/gradle-9.3.1-bin.zip \
+              -o /tmp/gradle.zip
+
+            unzip -q /tmp/gradle.zip -d /opt/
+
+            /opt/gradle-9.3.1/bin/gradle wrapper --gradle-version 9.3.1
+
+            chmod +x gradlew
+          fi
+
+      - name: Verify Gradle
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+          ./gradlew --version
+
+      - name: Build Debug APK
+        shell: bash
+        env:
+          GRADLE_OPTS: >-
+            -Dorg.gradle.daemon=false
+            -Dorg.gradle.jvmargs=-Xmx3g
+            -XX:MaxMetaspaceSize=768m
+          CI: true
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
 
           chmod +x gradlew
 
-          ./gradlew --version
-
-      # ==========================================================
-      # 14. Test Gradle configuration
-      # ==========================================================
-      - name: Test Gradle configuration
-        working-directory: project
-        shell: bash
-        run: |
-          set -euo pipefail
-
           ./gradlew \
-            :app:tasks \
+            clean \
+            assembleDebug \
             --no-daemon \
             --stacktrace \
             --warning-mode all
 
-      # ==========================================================
-      # 15. Compile Kotlin
-      # ==========================================================
-      - name: Compile Kotlin
-        working-directory: project
-        shell: bash
-        run: |
-          set -o pipefail
-
-          ./gradlew \
-            :app:compileDebugKotlin \
-            --no-daemon \
-            --stacktrace \
-            --warning-mode all \
-            2>&1 | tee kotlin-compile.log
-
-          EXIT_CODE=${PIPESTATUS[0]}
-
-          if [ "$EXIT_CODE" -ne 0 ]; then
-
-            echo ""
-            echo "========================================"
-            echo "KOTLIN ERRORS"
-            echo "========================================"
-
-            grep -E \
-              '(^e: |error: |Unresolved reference|Type mismatch|Expecting |Cannot access|Overload resolution ambiguity|Unexpected symbol|Unexpected tokens)' \
-              kotlin-compile.log \
-              | head -200 \
-              || true
-
-            echo ""
-            echo "========================================"
-            echo "ERROR CONTEXT"
-            echo "========================================"
-
-            grep -n \
-              -B 3 \
-              -A 8 \
-              '^e: ' \
-              kotlin-compile.log \
-              | head -300 \
-              || true
-
-            exit "$EXIT_CODE"
-          fi
-
-          echo "Kotlin compilation successful."
-
-      # ==========================================================
-      # 16. Build APK
-      # ==========================================================
-      - name: Build Debug APK
-        working-directory: project
-        shell: bash
-        run: |
-          set -o pipefail
-
-          echo "========================================"
-          echo "BUILDING APK"
-          echo "========================================"
-
-          ./gradlew \
-            :app:assembleDebug \
-            --no-daemon \
-            --stacktrace \
-            --warning-mode all \
-            2>&1 | tee build.log
-
-          EXIT_CODE=${PIPESTATUS[0]}
-
-          if [ "$EXIT_CODE" -ne 0 ]; then
-
-            echo ""
-            echo "========================================"
-            echo "BUILD FAILURE SUMMARY"
-            echo "========================================"
-
-            grep -E \
-              'Execution failed for task|(^e: )|error: |What went wrong|Caused by:|FAILED|FAILURE|Unexpected symbol|Unexpected tokens' \
-              build.log \
-              | head -250 \
-              || true
-
-            echo ""
-            echo "========================================"
-            echo "LAST 250 LINES"
-            echo "========================================"
-
-            tail -250 build.log
-
-            exit "$EXIT_CODE"
-          fi
-
-          echo ""
-          echo "========================================"
-          echo "APK BUILD SUCCESSFUL"
-          echo "========================================"
-
-      # ==========================================================
-      # 17. Find APK
-      # ==========================================================
       - name: Find APK
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
-          APK=$(
-            find project/app/build/outputs/apk/debug \
+          echo "Searching for APK..."
+
+          APK=$(find "$PROJECT_DIR" \
+            -type f \
+            -name "*.apk" \
+            -not -path "*/build/intermediates/*" \
+            | head -n 1)
+
+          if [ -z "$APK" ]; then
+            APK=$(find "$PROJECT_DIR" \
               -type f \
               -name "*.apk" \
-              -print -quit
-          )
+              | head -n 1)
+          fi
 
           if [ -z "$APK" ]; then
             echo "ERROR: APK was not generated."
@@ -1069,50 +271,23 @@ jobs:
           echo "APK found:"
           echo "$APK"
 
-      # ==========================================================
-      # 18. Prepare APK
-      # ==========================================================
-      - name: Prepare APK artifact
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mkdir -p artifacts
-
-          APK=$(
-            find project/app/build/outputs/apk/debug \
-              -type f \
-              -name "*.apk" \
-              -print -quit
-          )
+          mkdir -p "$PROJECT_DIR/output"
 
           cp "$APK" \
-            artifacts/APK-Builder-Mobile-debug.apk
+            "$PROJECT_DIR/output/Substack-Downloader-debug.apk"
 
-          ls -lh \
-            artifacts/APK-Builder-Mobile-debug.apk
-
-      # ==========================================================
-      # 19. Upload APK
-      # ==========================================================
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: APK-Builder-Mobile
-          path: artifacts/APK-Builder-Mobile-debug.apk
+          name: Substack-Downloader-APK
+          path: ${{ env.PROJECT_DIR }}/output/Substack-Downloader-debug.apk
           if-no-files-found: error
-          retention-days: 7
 
-      # ==========================================================
-      # 20. Upload diagnostics
-      # ==========================================================
-      - name: Upload diagnostics
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: Build-Diagnostics
-          path: |
-            project/kotlin-compile.log
-            project/build.log
-          if-no-files-found: ignore
-          retention-days: 7
+      - name: Build summary
+        if: success()
+        run: |
+          echo "======================================"
+          echo "APK BUILD SUCCESSFUL"
+          echo "======================================"
+          echo "Artifact: Substack-Downloader-APK"
+          echo "File: Substack-Downloader-debug.apk"
