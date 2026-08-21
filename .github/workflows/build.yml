@@ -15,35 +15,44 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ---------------------------------------------------------
+
+      # =========================================================
       # 1. Checkout
-      # ---------------------------------------------------------
+      # =========================================================
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ---------------------------------------------------------
-      # 2. Java 17
-      # ---------------------------------------------------------
+      # =========================================================
+      # 2. Setup Java 17
+      # =========================================================
       - name: Setup JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
-          cache: gradle
 
-      # ---------------------------------------------------------
-      # 3. Android SDK
-      # ---------------------------------------------------------
+      # =========================================================
+      # 3. Setup Android SDK
+      # =========================================================
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
+        with:
+          packages: ''
 
+      # =========================================================
+      # 4. Accept Android licenses
+      # =========================================================
       - name: Accept Android SDK licenses
         shell: bash
         run: |
           set -e
-          yes | sdkmanager --licenses >/dev/null || true
 
-      - name: Install Android SDK packages
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+
+      # =========================================================
+      # 5. Install SDK components
+      # =========================================================
+      - name: Install Android SDK components
         shell: bash
         run: |
           set -e
@@ -55,20 +64,18 @@ jobs:
             "build-tools;35.0.0" \
             "build-tools;36.0.0"
 
-      # ---------------------------------------------------------
-      # 4. Extract ZIP if needed
-      # ---------------------------------------------------------
-      - name: Extract project ZIP if needed
+      # =========================================================
+      # 6. Extract Substack Downloader ZIP
+      # =========================================================
+      - name: Extract project ZIP
         shell: bash
         run: |
           set -e
 
           if [ -d "extracted" ]; then
-            echo "extracted/ already exists."
+            echo "extracted directory already exists."
             exit 0
           fi
-
-          ZIP_FILE=""
 
           if [ -f "substack-downloader.zip" ]; then
             ZIP_FILE="substack-downloader.zip"
@@ -77,45 +84,50 @@ jobs:
           fi
 
           if [ -z "$ZIP_FILE" ]; then
-            echo "No ZIP file found."
+            echo "ERROR: ZIP file not found."
             exit 1
           fi
 
-          echo "Extracting: $ZIP_FILE"
+          echo "Using ZIP:"
+          echo "$ZIP_FILE"
 
           mkdir -p extracted
+
           unzip -o "$ZIP_FILE" -d extracted
 
-      # ---------------------------------------------------------
-      # 5. Locate Android project
-      # ---------------------------------------------------------
-      - name: Locate Android Gradle project
+      # =========================================================
+      # 7. Find actual Android project
+      # =========================================================
+      - name: Find Android project
         shell: bash
         run: |
           set -e
 
           PROJECT_DIR=""
 
-          # First: known location in this repository
+          # Known location
           if [ -f "extracted/settings.gradle.kts" ] || \
              [ -f "extracted/settings.gradle" ]; then
+
             PROJECT_DIR="$(realpath extracted)"
-          fi
 
-          # Second: root
-          if [ -z "$PROJECT_DIR" ]; then
-            if [ -f "settings.gradle.kts" ] || \
+          # Root project
+          elif [ -f "settings.gradle.kts" ] || \
                [ -f "settings.gradle" ]; then
-              PROJECT_DIR="$(pwd)"
-            fi
-          fi
 
-          # Third: search recursively
-          if [ -z "$PROJECT_DIR" ]; then
+            PROJECT_DIR="$(pwd)"
+
+          # Recursive search
+          else
+
             SETTINGS_FILE=$(
               find . \
                 -type f \
-                \( -name "settings.gradle.kts" -o -name "settings.gradle" \) \
+                \( \
+                  -name "settings.gradle.kts" \
+                  -o \
+                  -name "settings.gradle" \
+                \) \
                 -not -path "./.git/*" \
                 | head -n 1 || true
             )
@@ -123,75 +135,85 @@ jobs:
             if [ -n "$SETTINGS_FILE" ]; then
               PROJECT_DIR="$(realpath "$(dirname "$SETTINGS_FILE")")"
             fi
+
           fi
 
           if [ -z "$PROJECT_DIR" ]; then
             echo "ERROR: No Android Gradle project found."
+
             echo
-            echo "Repository contents:"
+            echo "Repository:"
             find . \
-              -maxdepth 5 \
+              -maxdepth 6 \
               -type f \
               -not -path "./.git/*" \
               | sort
+
             exit 1
           fi
 
-          echo "======================================"
+          echo "=============================================="
           echo "ANDROID PROJECT FOUND"
-          echo "======================================"
+          echo "=============================================="
+
           echo "$PROJECT_DIR"
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
           echo
-          echo "Project files:"
+          echo "Project tree:"
           find "$PROJECT_DIR" \
-            -maxdepth 3 \
+            -maxdepth 4 \
             -type f \
             -not -path "*/.gradle/*" \
             | sort
 
-      # ---------------------------------------------------------
-      # 6. Show project structure
-      # ---------------------------------------------------------
-      - name: Inspect project
+      # =========================================================
+      # 8. Inspect project
+      # =========================================================
+      - name: Inspect Gradle project
         shell: bash
         run: |
           set -e
 
           cd "$PROJECT_DIR"
 
-          echo "===== SETTINGS ====="
+          echo "================ SETTINGS ================"
 
           if [ -f settings.gradle.kts ]; then
             cat settings.gradle.kts
-          elif [ -f settings.gradle ]; then
+          fi
+
+          if [ -f settings.gradle ]; then
             cat settings.gradle
           fi
 
           echo
-          echo "===== ROOT BUILD ====="
+          echo "================ ROOT BUILD ================"
 
           if [ -f build.gradle.kts ]; then
             cat build.gradle.kts
-          elif [ -f build.gradle ]; then
+          fi
+
+          if [ -f build.gradle ]; then
             cat build.gradle
           fi
 
           echo
-          echo "===== APP BUILD ====="
+          echo "================ APP BUILD ================"
 
           if [ -f app/build.gradle.kts ]; then
             cat app/build.gradle.kts
-          elif [ -f app/build.gradle ]; then
+          fi
+
+          if [ -f app/build.gradle ]; then
             cat app/build.gradle
           fi
 
-      # ---------------------------------------------------------
-      # 7. Remove Google Services references
-      # ---------------------------------------------------------
-      - name: Remove Google Services references
+      # =========================================================
+      # 9. Remove Google Services
+      # =========================================================
+      - name: Repair Google Services configuration
         shell: bash
         run: |
           set -e
@@ -200,9 +222,10 @@ jobs:
 
           echo "Removing Google Services references..."
 
-          # Gradle build files
           while IFS= read -r FILE; do
-            echo "Repairing: $FILE"
+
+            echo "Checking:"
+            echo "$FILE"
 
             sed -i \
               '/com\.google\.gms\.google-services/d' \
@@ -221,13 +244,17 @@ jobs:
               -type f \
               \( \
                 -name "build.gradle" \
-                -o -name "build.gradle.kts" \
-                -o -name "libs.versions.toml" \
+                -o \
+                -name "build.gradle.kts" \
+                -o \
+                -name "libs.versions.toml" \
               \) \
               -not -path "./.gradle/*"
           )
 
-          # Remove google-services JSON files
+          echo
+          echo "Removing google-services.json..."
+
           find . \
             -type f \
             -name "google-services.json" \
@@ -236,9 +263,9 @@ jobs:
 
           echo "Google Services cleanup completed."
 
-      # ---------------------------------------------------------
-      # 8. Configure Gradle properties
-      # ---------------------------------------------------------
+      # =========================================================
+      # 10. Prepare Gradle properties
+      # =========================================================
       - name: Configure Gradle properties
         shell: bash
         run: |
@@ -250,54 +277,17 @@ jobs:
 
           cat >> gradle.properties <<'EOF'
 
-          org.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8
           org.gradle.daemon=false
           org.gradle.parallel=true
           org.gradle.caching=true
+          org.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8
           android.useAndroidX=true
           android.nonTransitiveRClass=false
           EOF
 
-      # ---------------------------------------------------------
-      # 9. Create debug keystore
-      # ---------------------------------------------------------
-      - name: Create debug keystore
-        shell: bash
-        run: |
-          set -e
-
-          cd "$PROJECT_DIR"
-
-          mkdir -p "$HOME/.android"
-
-          KEYSTORE="$HOME/.android/debug.keystore"
-
-          if [ ! -f "$KEYSTORE" ]; then
-            keytool \
-              -genkeypair \
-              -v \
-              -keystore "$KEYSTORE" \
-              -storepass android \
-              -alias androiddebugkey \
-              -keypass android \
-              -keyalg RSA \
-              -keysize 2048 \
-              -validity 10000 \
-              -dname "CN=Android Debug,O=Android,C=US"
-          fi
-
-          # Create copies in the common locations custom configs use.
-          cp "$KEYSTORE" "$PROJECT_DIR/debug.keystore"
-
-          if [ -d "$PROJECT_DIR/app" ]; then
-            cp "$KEYSTORE" "$PROJECT_DIR/app/debug.keystore"
-          fi
-
-          echo "Debug keystore created."
-
-      # ---------------------------------------------------------
-      # 10. Install Gradle 9.3.1
-      # ---------------------------------------------------------
+      # =========================================================
+      # 11. Install standalone Gradle 9.3.1
+      # =========================================================
       - name: Install Gradle 9.3.1
         shell: bash
         run: |
@@ -307,47 +297,52 @@ jobs:
           GRADLE_DIR="/opt/gradle-${GRADLE_VERSION}"
 
           if [ ! -d "$GRADLE_DIR" ]; then
+
             curl -fL \
               "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" \
               -o /tmp/gradle.zip
 
-            unzip -q /tmp/gradle.zip -d /opt/
+            unzip -q \
+              /tmp/gradle.zip \
+              -d /opt/
+
           fi
 
           echo "$GRADLE_DIR/bin" >> "$GITHUB_PATH"
 
+          export PATH="$GRADLE_DIR/bin:$PATH"
+
           gradle --version
 
-      # ---------------------------------------------------------
-      # 11. Generate Gradle Wrapper if missing
-      # ---------------------------------------------------------
-      - name: Generate Gradle Wrapper
+      # =========================================================
+      # 12. Create Gradle wrapper
+      # =========================================================
+      - name: Create Gradle wrapper
         shell: bash
         run: |
           set -e
 
           cd "$PROJECT_DIR"
 
+          mkdir -p gradle/wrapper
+
           if [ ! -f "gradlew" ]; then
-            echo "Gradle wrapper is missing."
-            echo "Generating Gradle 9.3.1 wrapper..."
+
+            echo "Gradle wrapper not found."
+            echo "Generating wrapper..."
 
             gradle wrapper \
               --gradle-version 9.3.1 \
               --distribution-type bin
+
           fi
 
           chmod +x gradlew
 
-          echo
-          echo "Gradle wrapper:"
-          ls -la gradlew
-          ls -la gradle/wrapper/
-
-      # ---------------------------------------------------------
-      # 12. Force Wrapper to Gradle 9.3.1
-      # ---------------------------------------------------------
-      - name: Force Gradle wrapper version
+      # =========================================================
+      # 13. Force wrapper to Gradle 9.3.1
+      # =========================================================
+      - name: Configure Gradle wrapper
         shell: bash
         run: |
           set -e
@@ -370,46 +365,77 @@ jobs:
 
           ./gradlew --version
 
-      # ---------------------------------------------------------
-      # 13. Remove accidental signing errors
-      # ---------------------------------------------------------
-      - name: Repair custom debug signing
+      # =========================================================
+      # 14. Generate debug keystore
+      # =========================================================
+      - name: Create debug keystore
         shell: bash
         run: |
           set -e
 
           cd "$PROJECT_DIR"
 
-          echo "Checking signing configuration..."
+          mkdir -p "$HOME/.android"
+
+          KEYSTORE="$HOME/.android/debug.keystore"
+
+          if [ ! -f "$KEYSTORE" ]; then
+
+            keytool \
+              -genkeypair \
+              -v \
+              -keystore "$KEYSTORE" \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+
+          fi
+
+          cp "$KEYSTORE" "$PROJECT_DIR/debug.keystore"
+
+          if [ -d "$PROJECT_DIR/app" ]; then
+            cp "$KEYSTORE" "$PROJECT_DIR/app/debug.keystore"
+          fi
+
+          echo "Debug keystore ready."
+
+      # =========================================================
+      # 15. Check for custom signing
+      # =========================================================
+      - name: Inspect signing configuration
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          echo "Signing references:"
 
           if [ -f app/build.gradle.kts ]; then
-            echo "Kotlin DSL app build file detected."
-
             grep -n \
               -E "debugConfig|signingConfigs|storeFile|storePassword|keyAlias|keyPassword" \
               app/build.gradle.kts || true
+          fi
 
-          elif [ -f app/build.gradle ]; then
-            echo "Groovy DSL app build file detected."
-
+          if [ -f app/build.gradle ]; then
             grep -n \
               -E "debugConfig|signingConfigs|storeFile|storePassword|keyAlias|keyPassword" \
               app/build.gradle || true
           fi
 
-          echo "Available keystores:"
-          find . \
-            -type f \
-            -name "*.keystore" \
-            -o \
-            -name "*.jks" \
-            | sort || true
-
-      # ---------------------------------------------------------
-      # 14. Clean
-      # ---------------------------------------------------------
+      # =========================================================
+      # 16. Clean Gradle
+      # =========================================================
       - name: Gradle clean
         shell: bash
+        env:
+          GRADLE_OPTS: >-
+            -Dorg.gradle.daemon=false
+            -Dorg.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=768m
         run: |
           set -e
 
@@ -420,9 +446,9 @@ jobs:
             --no-daemon \
             --stacktrace
 
-      # ---------------------------------------------------------
-      # 15. Build APK
-      # ---------------------------------------------------------
+      # =========================================================
+      # 17. Build Debug APK
+      # =========================================================
       - name: Build Debug APK
         shell: bash
         env:
@@ -439,40 +465,48 @@ jobs:
             assembleDebug \
             --no-daemon \
             --stacktrace \
-            --info \
             --warning-mode all
 
-      # ---------------------------------------------------------
-      # 16. Locate APK
-      # ---------------------------------------------------------
-      - name: Locate generated APK
+      # =========================================================
+      # 18. Find APK
+      # =========================================================
+      - name: Find generated APK
         shell: bash
         run: |
           set -e
 
-          echo "Searching for generated APK..."
+          echo "Searching for APK..."
 
-          APK_FILES=$(find "$PROJECT_DIR" \
-            -type f \
-            -name "*.apk" \
-            -not -path "*/.gradle/*" \
-            | sort)
+          APK_FILES=$(
+            find "$PROJECT_DIR" \
+              -type f \
+              -name "*.apk" \
+              -not -path "*/.gradle/*" \
+              | sort
+          )
 
           if [ -z "$APK_FILES" ]; then
-            echo "ERROR: No APK generated."
+
+            echo "ERROR: No APK was generated."
+
             echo
-            echo "Build directory:"
+            echo "Build directories:"
             find "$PROJECT_DIR" \
               -type d \
               -name build \
-              -print
+              | sort
+
             exit 1
           fi
 
-          echo "Found APK files:"
+          echo "APK files:"
           echo "$APK_FILES"
 
-          APK=$(echo "$APK_FILES" | grep -E 'debug.*\.apk$' | head -n 1 || true)
+          APK=$(
+            echo "$APK_FILES" \
+              | grep -E 'debug.*\.apk$' \
+              | head -n 1 || true
+          )
 
           if [ -z "$APK" ]; then
             APK=$(echo "$APK_FILES" | head -n 1)
@@ -480,7 +514,8 @@ jobs:
 
           mkdir -p "$PROJECT_DIR/output"
 
-          cp "$APK" \
+          cp \
+            "$APK" \
             "$PROJECT_DIR/output/Substack-Downloader-debug.apk"
 
           echo
@@ -489,12 +524,13 @@ jobs:
 
           echo
           echo "APK size:"
-          du -h "$PROJECT_DIR/output/Substack-Downloader-debug.apk"
+          du -h \
+            "$PROJECT_DIR/output/Substack-Downloader-debug.apk"
 
-      # ---------------------------------------------------------
-      # 17. Upload APK
-      # ---------------------------------------------------------
-      - name: Upload APK artifact
+      # =========================================================
+      # 19. Upload APK
+      # =========================================================
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: Substack-Downloader-debug
@@ -502,9 +538,9 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      # ---------------------------------------------------------
-      # 18. Build summary
-      # ---------------------------------------------------------
+      # =========================================================
+      # 20. Final summary
+      # =========================================================
       - name: Build summary
         if: success()
         shell: bash
