@@ -17,7 +17,7 @@ jobs:
     steps:
 
       # =========================================================
-      # 1. Checkout
+      # 1. CHECKOUT
       # =========================================================
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -32,27 +32,28 @@ jobs:
           java-version: '17'
 
       # =========================================================
-      # 3. Android SDK
+      # 3. ANDROID SDK
       # =========================================================
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
-        with:
-          packages: ''
 
       # =========================================================
-      # 4. Android licenses
+      # 4. ACCEPT SDK LICENSES
       # =========================================================
       - name: Accept Android SDK licenses
         shell: bash
         run: |
+          set -e
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
 
       # =========================================================
-      # 5. Android packages
+      # 5. INSTALL SDK COMPONENTS
       # =========================================================
       - name: Install Android SDK components
         shell: bash
         run: |
+          set -e
+
           sdkmanager \
             "platform-tools" \
             "platforms;android-35" \
@@ -61,37 +62,47 @@ jobs:
             "build-tools;36.0.0"
 
       # =========================================================
-      # 6. Extract ZIP
+      # 6. EXTRACT ZIP
       # =========================================================
-      - name: Extract project ZIP
+      - name: Extract Substack Downloader ZIP
         shell: bash
         run: |
           set -e
 
           if [ -d "extracted" ]; then
-            echo "extracted/ already exists"
+            echo "extracted/ already exists."
           else
+
             ZIP_FILE=""
 
             if [ -f "substack-downloader.zip" ]; then
               ZIP_FILE="substack-downloader.zip"
             else
-              ZIP_FILE="$(find . -maxdepth 2 -type f -name '*.zip' | head -n 1 || true)"
+              ZIP_FILE="$(
+                find . \
+                  -maxdepth 2 \
+                  -type f \
+                  -name '*.zip' \
+                  | head -n 1 \
+                  || true
+              )"
             fi
 
             if [ -z "$ZIP_FILE" ]; then
-              echo "ERROR: No ZIP file found"
+              echo "ERROR: No ZIP file found."
               exit 1
             fi
 
-            echo "Using ZIP: $ZIP_FILE"
+            echo "ZIP:"
+            echo "$ZIP_FILE"
 
             mkdir -p extracted
+
             unzip -o "$ZIP_FILE" -d extracted
           fi
 
       # =========================================================
-      # 7. Locate Android project
+      # 7. FIND ANDROID PROJECT
       # =========================================================
       - name: Locate Android project
         shell: bash
@@ -100,32 +111,44 @@ jobs:
 
           PROJECT_DIR=""
 
-          if [ -f "extracted/settings.gradle.kts" ] || [ -f "extracted/settings.gradle" ]; then
+          if [ -f "extracted/settings.gradle.kts" ] || \
+             [ -f "extracted/settings.gradle" ]; then
+
             PROJECT_DIR="$(realpath extracted)"
 
-          elif [ -f "settings.gradle.kts" ] || [ -f "settings.gradle" ]; then
+          elif [ -f "settings.gradle.kts" ] || \
+               [ -f "settings.gradle" ]; then
+
             PROJECT_DIR="$PWD"
 
           else
+
             SETTINGS_FILE="$(
               find . \
                 -type f \
-                \( -name 'settings.gradle.kts' -o -name 'settings.gradle' \) \
+                \( \
+                  -name 'settings.gradle.kts' \
+                  -o \
+                  -name 'settings.gradle' \
+                \) \
                 -not -path './.git/*' \
                 | head -n 1 \
                 || true
             )"
 
             if [ -n "$SETTINGS_FILE" ]; then
-              PROJECT_DIR="$(realpath "$(dirname "$SETTINGS_FILE")")"
+              PROJECT_DIR="$(
+                realpath "$(dirname "$SETTINGS_FILE")"
+              )"
             fi
           fi
 
           if [ -z "$PROJECT_DIR" ]; then
-            echo "ERROR: No Android Gradle project found"
+            echo "ERROR: Android Gradle project not found."
 
             echo
-            echo "Repository files:"
+            echo "Repository contents:"
+
             find . \
               -maxdepth 6 \
               -type f \
@@ -136,7 +159,7 @@ jobs:
           fi
 
           echo "=============================================="
-          echo "ANDROID PROJECT FOUND"
+          echo "ANDROID PROJECT"
           echo "=============================================="
 
           echo "$PROJECT_DIR"
@@ -144,57 +167,198 @@ jobs:
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
       # =========================================================
-      # 8. Remove Google Services BEFORE Gradle
+      # 8. REMOVE GOOGLE SERVICES COMPLETELY
       # =========================================================
-      - name: Remove Google Services references
+      - name: Remove Google Services completely
         shell: bash
         run: |
           set -e
 
           cd "$PROJECT_DIR"
 
-          find . \
-            -type f \
-            \( \
-              -name 'build.gradle' \
-              -o \
-              -name 'build.gradle.kts' \
-              -o \
-              -name 'libs.versions.toml' \
-            \) \
-            -not -path './.gradle/*' \
-            -print0 |
-          while IFS= read -r -d '' FILE; do
+          echo "=============================================="
+          echo "REMOVING GOOGLE SERVICES"
+          echo "=============================================="
 
-            echo "Repairing: $FILE"
+          export PROJECT_DIR
 
-            sed -i \
-              -e '/libs\.plugins\.google\.services/d' \
-              -e '/com\.google\.gms\.google-services/d' \
-              -e '/google-services/d' \
-              -e '/googleServices/d' \
-              "$FILE"
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+          import os
 
-          done
+          root = Path(os.environ["PROJECT_DIR"])
 
-          find . \
-            -type f \
-            -name 'google-services.json' \
-            -delete || true
+          gradle_files = []
 
-          echo
-          echo "Remaining Google Services references:"
+          for pattern in (
+              "**/build.gradle",
+              "**/build.gradle.kts",
+              "**/settings.gradle",
+              "**/settings.gradle.kts",
+              "**/libs.versions.toml",
+          ):
+              gradle_files.extend(root.glob(pattern))
 
-          grep -Rni \
+          gradle_files = sorted(set(gradle_files))
+
+          print("Files to inspect:")
+          for file in gradle_files:
+              print(" -", file)
+
+          def remove_block(text, block_name):
+              pattern = re.compile(
+                  rf'(?m)^[ \t]*{re.escape(block_name)}\s*\{{'
+              )
+
+              while True:
+                  match = pattern.search(text)
+
+                  if not match:
+                      break
+
+                  start = match.start()
+                  brace_start = text.find("{", match.start())
+
+                  depth = 0
+                  end = None
+
+                  for i in range(brace_start, len(text)):
+                      if text[i] == "{":
+                          depth += 1
+                      elif text[i] == "}":
+                          depth -= 1
+
+                          if depth == 0:
+                              end = i + 1
+                              break
+
+                  if end is None:
+                      break
+
+                  text = text[:start] + text[end:]
+
+              return text
+
+          for file in gradle_files:
+              try:
+                  text = file.read_text(encoding="utf-8")
+              except Exception:
+                  continue
+
+              original = text
+
+              lines = text.splitlines()
+
+              cleaned = []
+
+              for line in lines:
+                  stripped = line.strip()
+
+                  # Remove Google Services imports
+                  if stripped.startswith(
+                      "import com.google.gms.googleservices"
+                  ):
+                      continue
+
+                  # Remove direct Google Services plugin
+                  if "com.google.gms.google-services" in line:
+                      continue
+
+                  # Remove version catalog Google Services alias
+                  if "libs.plugins.google.services" in line:
+                      continue
+
+                  # Remove old plugin syntax
+                  if "apply plugin" in line and "google-services" in line:
+                      continue
+
+                  # Remove Google Services plugin declarations
+                  if "id(\"com.google.gms.google-services\")" in line:
+                      continue
+
+                  if "id('com.google.gms.google-services')" in line:
+                      continue
+
+                  # Remove MissingGoogleServicesStrategy references
+                  if "MissingGoogleServicesStrategy" in line:
+                      continue
+
+                  cleaned.append(line)
+
+              text = "\n".join(cleaned)
+
+              # Remove whole googleServices { ... } blocks
+              text = remove_block(text, "googleServices")
+
+              # Remove remaining references
+              text = re.sub(
+                  r'(?m)^[ \t]*.*google-services.*$\n?',
+                  "",
+                  text,
+                  flags=re.IGNORECASE,
+              )
+
+              text = re.sub(
+                  r'(?m)^[ \t]*.*googleServices.*$\n?',
+                  "",
+                  text,
+              )
+
+              file.write_text(
+                  text.rstrip() + "\n",
+                  encoding="utf-8",
+              )
+
+              if text != original:
+                  print("Modified:", file)
+
+          # Delete every google-services.json
+          for file in root.rglob("google-services.json"):
+              try:
+                  file.unlink()
+                  print("Deleted:", file)
+              except Exception:
+                  pass
+
+          print("Google Services cleanup complete.")
+          PY
+
+      # =========================================================
+      # 9. VERIFY GOOGLE SERVICES IS GONE
+      # =========================================================
+      - name: Verify Google Services removal
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          echo "Searching for forbidden Google Services references..."
+
+          FOUND=0
+
+          if grep -Rni \
             --exclude-dir=.git \
             --exclude-dir=.gradle \
             -E \
-            'google-services|googleServices|libs\.plugins\.google\.services|com\.google\.gms\.google-services' \
-            . \
-            || true
+            'com\.google\.gms\.googleservices|com\.google\.gms\.google-services|google-services|googleServices|MissingGoogleServicesStrategy|libs\.plugins\.google\.services' \
+            .; then
+
+            FOUND=1
+
+          fi
+
+          if [ "$FOUND" -ne 0 ]; then
+            echo
+            echo "ERROR: Google Services references still exist."
+            exit 1
+          fi
+
+          echo "No Google Services references remain."
 
       # =========================================================
-      # 9. Configure Gradle properties
+      # 10. GRADLE PROPERTIES
       # =========================================================
       - name: Configure Gradle properties
         shell: bash
@@ -224,7 +388,7 @@ jobs:
             >> gradle.properties
 
       # =========================================================
-      # 10. Install Gradle 9.3.1
+      # 11. GRADLE 9.3.1
       # =========================================================
       - name: Install Gradle 9.3.1
         shell: bash
@@ -243,7 +407,6 @@ jobs:
             unzip -q \
               /tmp/gradle.zip \
               -d /opt/
-
           fi
 
           echo "$DIR/bin" >> "$GITHUB_PATH"
@@ -251,7 +414,7 @@ jobs:
           "$DIR/bin/gradle" --version
 
       # =========================================================
-      # 11. Debug keystore
+      # 12. DEBUG KEYSTORE
       # =========================================================
       - name: Create debug keystore
         shell: bash
@@ -283,64 +446,60 @@ jobs:
             "$PROJECT_DIR/debug.keystore"
 
           if [ -d "$PROJECT_DIR/app" ]; then
+
             cp \
               "$KEYSTORE" \
               "$PROJECT_DIR/app/debug.keystore"
+
           fi
 
-          echo "Debug keystore ready."
-
       # =========================================================
-      # 12. Inspect repaired project
+      # 13. FINAL PROJECT CHECK
       # =========================================================
-      - name: Inspect repaired Gradle files
+      - name: Show final Gradle files
         shell: bash
         run: |
           set -e
 
           cd "$PROJECT_DIR"
 
-          echo "================ SETTINGS ================"
+          echo "=============================================="
+          echo "settings.gradle.kts"
+          echo "=============================================="
 
           if [ -f settings.gradle.kts ]; then
             cat settings.gradle.kts
           fi
 
-          if [ -f settings.gradle ]; then
-            cat settings.gradle
-          fi
-
           echo
-          echo "================ ROOT BUILD ================"
+          echo "=============================================="
+          echo "build.gradle.kts"
+          echo "=============================================="
 
           if [ -f build.gradle.kts ]; then
             cat build.gradle.kts
           fi
 
-          if [ -f build.gradle ]; then
-            cat build.gradle
-          fi
-
           echo
-          echo "================ APP BUILD ================"
+          echo "=============================================="
+          echo "app/build.gradle.kts"
+          echo "=============================================="
 
           if [ -f app/build.gradle.kts ]; then
             cat app/build.gradle.kts
           fi
 
-          if [ -f app/build.gradle ]; then
-            cat app/build.gradle
-          fi
-
           echo
-          echo "================ VERSION CATALOG ================"
+          echo "=============================================="
+          echo "libs.versions.toml"
+          echo "=============================================="
 
           if [ -f gradle/libs.versions.toml ]; then
             cat gradle/libs.versions.toml
           fi
 
       # =========================================================
-      # 13. Build APK
+      # 14. BUILD
       # =========================================================
       - name: Build Debug APK
         shell: bash
@@ -354,23 +513,34 @@ jobs:
 
           export PATH="/opt/gradle-9.3.1/bin:$PATH"
 
-          echo "Gradle:"
+          echo "Gradle version:"
           gradle --version
 
           echo
-          echo "Running clean assembleDebug..."
+          echo "=============================================="
+          echo "RUNNING CLEAN"
+          echo "=============================================="
 
           gradle \
             clean \
+            --no-daemon \
+            --stacktrace
+
+          echo
+          echo "=============================================="
+          echo "RUNNING ASSEMBLE DEBUG"
+          echo "=============================================="
+
+          gradle \
             assembleDebug \
             --no-daemon \
             --stacktrace \
             --warning-mode all
 
       # =========================================================
-      # 14. Find APK
+      # 15. FIND APK
       # =========================================================
-      - name: Find generated APK
+      - name: Find APK
         shell: bash
         run: |
           set -e
@@ -388,6 +558,7 @@ jobs:
           )"
 
           if [ -z "$APK" ]; then
+
             APK="$(
               find "$PROJECT_DIR" \
                 -type f \
@@ -396,17 +567,26 @@ jobs:
                 | head -n 1 \
                 || true
             )"
+
           fi
 
           if [ -z "$APK" ]; then
-            echo "ERROR: No APK was generated"
+            echo "ERROR: APK was not generated."
+
+            echo
+            echo "APK search:"
+            find "$PROJECT_DIR" \
+              -type f \
+              -name '*.apk' \
+              -print \
+              || true
 
             echo
             echo "Build directories:"
-
             find "$PROJECT_DIR" \
               -type d \
               -name build \
+              -print \
               | sort \
               || true
 
@@ -423,12 +603,12 @@ jobs:
             "$PROJECT_DIR/output/Substack-Downloader-debug.apk"
 
           echo
-          echo "Final APK:"
+          echo "Final APK size:"
           du -h \
             "$PROJECT_DIR/output/Substack-Downloader-debug.apk"
 
       # =========================================================
-      # 15. Upload APK
+      # 16. UPLOAD APK
       # =========================================================
       - name: Upload APK
         uses: actions/upload-artifact@v6
@@ -439,9 +619,9 @@ jobs:
           retention-days: 30
 
       # =========================================================
-      # 16. Summary
+      # 17. SUCCESS
       # =========================================================
-      - name: Build summary
+      - name: Build successful
         if: success()
         shell: bash
         run: |
@@ -449,4 +629,5 @@ jobs:
           echo "SUBSTACK DOWNLOADER BUILD SUCCESSFUL"
           echo "=============================================="
           echo
-          echo "Artifact: Substack-Downloader-debug"
+          echo "Artifact:"
+          echo "Substack-Downloader-debug"
