@@ -1,365 +1,476 @@
 name: Build SAM Advanced APK Analyzer
 
 'on':
-workflow_dispatch:
-push:
-branches:
-- main
-- master
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
 
 permissions:
-contents: read
+  contents: read
 
 jobs:
-build:
-runs-on: ubuntu-latest
+  build:
+    name: Build SAM APK
+    runs-on: ubuntu-latest
 
-steps:
+    steps:
 
-  # =========================================================
-  # 1. CHECKOUT
-  # =========================================================
-  - name: Checkout repository
-    uses: actions/checkout@v6
+      # =========================================================
+      # 1. CHECKOUT
+      # =========================================================
 
-  # =========================================================
-  # 2. JAVA 21
-  # =========================================================
-  - name: Setup JDK 21
-    uses: actions/setup-java@v5
-    with:
-      distribution: temurin
-      java-version: '21'
-      cache: gradle
+      - name: Checkout repository
+        uses: actions/checkout@v6
 
-  # =========================================================
-  # 3. ANDROID SDK
-  # =========================================================
-  - name: Setup Android SDK
-    uses: android-actions/setup-android@v4
-    with:
-      packages: ''
 
-  # =========================================================
-  # 4. INSTALL SDK COMPONENTS
-  # =========================================================
-  - name: Install Android SDK components
-    shell: bash
-    run: |
-      set -e
+      # =========================================================
+      # 2. JAVA 21
+      # =========================================================
 
-      sdkmanager \
-        "platform-tools" \
-        "platforms;android-35" \
-        "platforms;android-36" \
-        "build-tools;35.0.0" \
-        "build-tools;36.0.0"
+      - name: Setup JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
 
-  # =========================================================
-  # 5. FIND SAM ZIP
-  # =========================================================
-  - name: Find SAM project ZIP
-    shell: bash
-    run: |
-      set -e
 
-      ZIP_FILE=""
+      # =========================================================
+      # 3. ANDROID SDK
+      # =========================================================
 
-      if [ -f "$GITHUB_WORKSPACE/remix-sam_-advanced-apk-analyzer.zip" ]; then
-        ZIP_FILE="$GITHUB_WORKSPACE/remix-sam_-advanced-apk-analyzer.zip"
-      else
-        ZIP_FILE="$(
-          find "$GITHUB_WORKSPACE" \
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+
+
+      # =========================================================
+      # 4. ACCEPT ANDROID LICENSES
+      # =========================================================
+
+      - name: Accept Android SDK licenses
+        shell: bash
+        run: |
+          set -e
+
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+
+
+      # =========================================================
+      # 5. INSTALL ANDROID SDK
+      # =========================================================
+
+      - name: Install Android SDK components
+        shell: bash
+        run: |
+          set -e
+
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-36" \
+            "build-tools;36.0.0"
+
+
+      # =========================================================
+      # 6. FIND SAM ZIP
+      # =========================================================
+
+      - name: Find SAM project ZIP
+        shell: bash
+        run: |
+          set -e
+
+          ZIP_FILE=""
+
+          if [ -f "$GITHUB_WORKSPACE/remix-sam_-advanced-apk-analyzer.zip" ]; then
+            ZIP_FILE="$GITHUB_WORKSPACE/remix-sam_-advanced-apk-analyzer.zip"
+          else
+            ZIP_FILE="$(
+              find "$GITHUB_WORKSPACE" \
+                -type f \
+                -name 'remix-sam_-advanced-apk-analyzer.zip' \
+                | head -n 1 \
+                || true
+            )"
+          fi
+
+          if [ -z "$ZIP_FILE" ]; then
+            echo "ERROR: remix-sam_-advanced-apk-analyzer.zip was not found."
+
+            echo
+            echo "ZIP files found:"
+            find "$GITHUB_WORKSPACE" \
+              -type f \
+              -name '*.zip' \
+              -print \
+              || true
+
+            exit 1
+          fi
+
+          echo "ZIP_FILE=$ZIP_FILE" >> "$GITHUB_ENV"
+
+          echo
+          echo "Using ZIP:"
+          echo "$ZIP_FILE"
+
+
+      # =========================================================
+      # 7. EXTRACT SAM PROJECT
+      # =========================================================
+
+      - name: Extract SAM project
+        shell: bash
+        run: |
+          set -e
+
+          rm -rf "$GITHUB_WORKSPACE/extracted"
+
+          mkdir -p "$GITHUB_WORKSPACE/extracted"
+
+          unzip -q -o \
+            "$ZIP_FILE" \
+            -d "$GITHUB_WORKSPACE/extracted"
+
+          echo "SAM project extracted."
+
+
+      # =========================================================
+      # 8. LOCATE ANDROID PROJECT
+      # =========================================================
+
+      - name: Locate Android project
+        shell: bash
+        run: |
+          set -e
+
+          PROJECT_DIR=""
+
+          SETTINGS_FILE="$(
+            find "$GITHUB_WORKSPACE/extracted" \
+              -type f \
+              \( \
+                -name 'settings.gradle.kts' \
+                -o \
+                -name 'settings.gradle' \
+              \) \
+              | head -n 1 \
+              || true
+          )"
+
+          if [ -n "$SETTINGS_FILE" ]; then
+            PROJECT_DIR="$(dirname "$SETTINGS_FILE")"
+          fi
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "ERROR: Android Gradle project not found."
+
+            echo
+            echo "Extracted files:"
+            find "$GITHUB_WORKSPACE/extracted" \
+              -maxdepth 8 \
+              -type f \
+              | sort
+
+            exit 1
+          fi
+
+          PROJECT_DIR="$(realpath "$PROJECT_DIR")"
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          echo
+          echo "=============================================="
+          echo "ANDROID PROJECT FOUND"
+          echo "=============================================="
+          echo "$PROJECT_DIR"
+
+
+      # =========================================================
+      # 9. VERIFY PROJECT
+      # =========================================================
+
+      - name: Verify Android project
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          echo "Project root:"
+          pwd
+
+          echo
+          echo "Gradle configuration:"
+          find . \
             -maxdepth 3 \
             -type f \
-            -name 'remix-sam_-advanced-apk-analyzer.zip' \
-            | head -n 1 \
-            || true
-        )"
-      fi
+            \( \
+              -name 'settings.gradle' \
+              -o \
+              -name 'settings.gradle.kts' \
+              -o \
+              -name 'build.gradle' \
+              -o \
+              -name 'build.gradle.kts' \
+              -o \
+              -name 'gradle.properties' \
+            \) \
+            | sort
 
-      if [ -z "$ZIP_FILE" ]; then
-        echo "ERROR: remix-sam_-advanced-apk-analyzer.zip not found."
-        echo
-        echo "Available ZIP files:"
-        find "$GITHUB_WORKSPACE" \
-          -type f \
-          -name '*.zip' \
-          -print \
-          || true
-        exit 1
-      fi
 
-      echo "ZIP_FILE=$ZIP_FILE" >> "$GITHUB_ENV"
+      # =========================================================
+      # 10. CREATE DEBUG KEYSTORE
+      # =========================================================
 
-      echo "Using:"
-      echo "$ZIP_FILE"
+      - name: Create debug keystore
+        shell: bash
+        run: |
+          set -e
 
-  # =========================================================
-  # 6. EXTRACT SAM PROJECT
-  # =========================================================
-  - name: Extract SAM project
-    shell: bash
-    run: |
-      set -e
+          KEYSTORE="$PROJECT_DIR/debug.keystore"
 
-      rm -rf "$GITHUB_WORKSPACE/extracted"
+          if [ ! -f "$KEYSTORE" ]; then
 
-      mkdir -p "$GITHUB_WORKSPACE/extracted"
+            keytool \
+              -genkeypair \
+              -v \
+              -keystore "$KEYSTORE" \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
 
-      unzip -q -o \
-        "$ZIP_FILE" \
-        -d "$GITHUB_WORKSPACE/extracted"
+          fi
 
-      echo "Extraction completed."
+          echo "Debug keystore created:"
+          ls -lh "$KEYSTORE"
 
-  # =========================================================
-  # 7. LOCATE ANDROID PROJECT
-  # =========================================================
-  - name: Locate Android project
-    shell: bash
-    run: |
-      set -e
 
-      PROJECT_DIR=""
+      # =========================================================
+      # 11. INSTALL GRADLE 9.3.1
+      # =========================================================
 
-      SETTINGS_FILE="$(
-        find "$GITHUB_WORKSPACE/extracted" \
-          -type f \
-          \
-            -name 'settings.gradle' \
-            -o \
-            -name 'settings.gradle.kts' \
-          \
-          | head -n 1 \
-          || true
-      )"
+      - name: Install Gradle 9.3.1
+        shell: bash
+        run: |
+          set -e
 
-      if [ -n "$SETTINGS_FILE" ]; then
-        PROJECT_DIR="$(dirname "$SETTINGS_FILE")"
-      fi
+          GRADLE_VERSION="9.3.1"
+          GRADLE_DIR="/opt/gradle-${GRADLE_VERSION}"
 
-      if [ -z "$PROJECT_DIR" ]; then
-        echo "ERROR: Android project not found."
+          if [ ! -d "$GRADLE_DIR" ]; then
 
-        echo
-        echo "Extracted files:"
-        find "$GITHUB_WORKSPACE/extracted" \
-          -maxdepth 7 \
-          -type f \
-          | sort
+            curl \
+              -fL \
+              "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" \
+              -o /tmp/gradle.zip
 
-        exit 1
-      fi
+            unzip \
+              -q \
+              /tmp/gradle.zip \
+              -d /opt/
 
-      PROJECT_DIR="$(realpath "$PROJECT_DIR")"
+          fi
 
-      echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "$GRADLE_DIR/bin" >> "$GITHUB_PATH"
 
-      echo
-      echo "=============================================="
-      echo "SAM ANDROID PROJECT"
-      echo "=============================================="
-      echo "$PROJECT_DIR"
+          "$GRADLE_DIR/bin/gradle" --version
 
-  # =========================================================
-  # 8. VERIFY PROJECT
-  # =========================================================
-  - name: Verify Android project
-    shell: bash
-    run: |
-      set -e
 
-      cd "$PROJECT_DIR"
+      # =========================================================
+      # 12. VERIFY JAVA + GRADLE
+      # =========================================================
 
-      echo "Project files:"
-      ls -la
+      - name: Verify build environment
+        shell: bash
+        run: |
+          set -e
 
-      echo
-      echo "Gradle files:"
+          echo "=============================================="
+          echo "JAVA"
+          echo "=============================================="
 
-      find . \
-        -maxdepth 3 \
-        -type f \
-        \
-          -name 'settings.gradle' \
-          -o \
-          -name 'settings.gradle.kts' \
-          -o \
-          -name 'build.gradle' \
-          -o \
-          -name 'build.gradle.kts' \
-          -o \
-          -name 'gradle.properties' \
-        \
-        | sort
+          java -version
 
-  # =========================================================
-  # 9. MAKE GRADLE WRAPPER EXECUTABLE
-  # =========================================================
-  - name: Prepare Gradle wrapper
-    shell: bash
-    run: |
-      set -e
+          echo
+          echo "=============================================="
+          echo "GRADLE"
+          echo "=============================================="
 
-      cd "$PROJECT_DIR"
+          gradle --version
 
-      if [ -f "./gradlew" ]; then
-        chmod +x ./gradlew
-        echo "Gradle wrapper found."
-      else
-        echo "No Gradle wrapper found."
-      fi
 
-  # =========================================================
-  # 10. BUILD DEBUG APK
-  # =========================================================
-  - name: Build SAM Debug APK
-    shell: bash
-    env:
-      CI: true
-      GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8"
-    run: |
-      set -e
+      # =========================================================
+      # 13. VERIFY GRADLE PROJECT
+      # =========================================================
 
-      cd "$PROJECT_DIR"
+      - name: Verify Gradle project
+        shell: bash
+        env:
+          GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx4g"
+        run: |
+          set -e
 
-      echo
-      echo "=============================================="
-      echo "BUILDING SAM ADVANCED APK ANALYZER"
-      echo "=============================================="
+          cd "$PROJECT_DIR"
 
-      if [ -f "./gradlew" ]; then
+          gradle \
+            tasks \
+            --no-daemon \
+            --stacktrace
 
-        ./gradlew \
-          assembleDebug \
-          --no-daemon \
-          --stacktrace \
-          --warning-mode all
 
-      else
+      # =========================================================
+      # 14. BUILD DEBUG APK
+      # =========================================================
 
-        echo "Gradle wrapper not found."
-        echo "Installing Gradle 8.11.1..."
+      - name: Build SAM Debug APK
+        shell: bash
+        env:
+          CI: true
+          GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8"
+        run: |
+          set -e
 
-        GRADLE_VERSION="8.11.1"
-        GRADLE_DIR="/opt/gradle-${GRADLE_VERSION}"
+          cd "$PROJECT_DIR"
 
-        if [ ! -d "$GRADLE_DIR" ]; then
+          echo
+          echo "=============================================="
+          echo "BUILDING SAM ADVANCED APK ANALYZER"
+          echo "=============================================="
 
-          curl -fL \
-            "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" \
-            -o /tmp/gradle.zip
+          gradle \
+            :app:assembleDebug \
+            --no-daemon \
+            --stacktrace \
+            --warning-mode all
 
-          unzip -q \
-            /tmp/gradle.zip \
-            -d /opt/
+          echo
+          echo "BUILD FINISHED."
 
-        fi
 
-        export PATH="$GRADLE_DIR/bin:$PATH"
+      # =========================================================
+      # 15. FIND APK
+      # =========================================================
 
-        gradle \
-          assembleDebug \
-          --no-daemon \
-          --stacktrace \
-          --warning-mode all
+      - name: Find generated APK
+        shell: bash
+        run: |
+          set -e
 
-      fi
+          APK="$(
+            find "$PROJECT_DIR/app/build/outputs/apk" \
+              -type f \
+              -name '*debug*.apk' \
+              | head -n 1 \
+              || true
+          )"
 
-  # =========================================================
-  # 11. FIND APK
-  # =========================================================
-  - name: Locate generated APK
-    shell: bash
-    run: |
-      set -e
+          if [ -z "$APK" ]; then
 
-      APK="$(
-        find "$PROJECT_DIR" \
-          -type f \
-          -name '*.apk' \
-          -not -path '*/.gradle/*' \
-          | grep -E '/build/outputs/apk/.*/.*debug.*\.apk$' \
-          | head -n 1 \
-          || true
-      )"
+            APK="$(
+              find "$PROJECT_DIR" \
+                -type f \
+                -name '*.apk' \
+                -not -path '*/.gradle/*' \
+                | head -n 1 \
+                || true
+            )"
 
-      if [ -z "$APK" ]; then
+          fi
 
-        APK="$(
-          find "$PROJECT_DIR" \
-            -type f \
-            -name '*.apk' \
-            -not -path '*/.gradle/*' \
-            | head -n 1 \
-            || true
-        )"
+          if [ -z "$APK" ]; then
 
-      fi
+            echo "ERROR: APK was not generated."
 
-      if [ -z "$APK" ]; then
+            echo
+            echo "APK files:"
+            find "$PROJECT_DIR" \
+              -type f \
+              -name '*.apk' \
+              -print \
+              || true
 
-        echo "ERROR: No APK generated."
+            echo
+            echo "Build output:"
+            find "$PROJECT_DIR/app/build" \
+              -maxdepth 6 \
+              -type f \
+              | sort \
+              || true
 
-        echo
-        echo "APK search result:"
-        find "$PROJECT_DIR" \
-          -type f \
-          -name '*.apk' \
-          -print \
-          || true
+            exit 1
+          fi
 
-        echo
-        echo "Build directories:"
-        find "$PROJECT_DIR" \
-          -type d \
-          -name 'build' \
-          -print \
-          | sort \
-          || true
+          echo "APK found:"
+          echo "$APK"
 
-        exit 1
-      fi
+          mkdir -p "$PROJECT_DIR/output"
 
-      echo "APK found:"
-      echo "$APK"
+          cp \
+            "$APK" \
+            "$PROJECT_DIR/output/SAM-Advanced-APK-Analyzer-debug.apk"
 
-      mkdir -p "$PROJECT_DIR/output"
+          echo
+          echo "Final APK:"
+          ls -lh \
+            "$PROJECT_DIR/output/SAM-Advanced-APK-Analyzer-debug.apk"
 
-      cp \
-        "$APK" \
-        "$PROJECT_DIR/output/SAM-Advanced-APK-Analyzer-debug.apk"
+          echo "APK_PATH=$PROJECT_DIR/output/SAM-Advanced-APK-Analyzer-debug.apk" >> "$GITHUB_ENV"
 
-      echo
-      echo "Final APK:"
-      ls -lh \
-        "$PROJECT_DIR/output/SAM-Advanced-APK-Analyzer-debug.apk"
 
-      echo "APK_PATH=$PROJECT_DIR/output/SAM-Advanced-APK-Analyzer-debug.apk" >> "$GITHUB_ENV"
+      # =========================================================
+      # 16. SHA256
+      # =========================================================
 
-  # =========================================================
-  # 12. UPLOAD APK
-  # =========================================================
-  - name: Upload SAM APK
-    uses: actions/upload-artifact@v6
-    with:
-      name: SAM-Advanced-APK-Analyzer-debug
-      path: ${{ env.APK_PATH }}
-      if-no-files-found: error
-      retention-days: 30
+      - name: Generate APK SHA256
+        shell: bash
+        run: |
+          set -e
 
-  # =========================================================
-  # 13. SUCCESS
-  # =========================================================
-  - name: Build successful
-    if: success()
-    shell: bash
-    run: |
-      echo
-      echo "=============================================="
-      echo "SAM BUILD SUCCESSFUL"
-      echo "=============================================="
-      echo
-      echo "Artifact:"
-      echo "SAM-Advanced-APK-Analyzer-debug"
+          cd "$PROJECT_DIR/output"
+
+          sha256sum \
+            SAM-Advanced-APK-Analyzer-debug.apk \
+            > SHA256SUMS.txt
+
+          cat SHA256SUMS.txt
+
+
+      # =========================================================
+      # 17. UPLOAD APK
+      # =========================================================
+
+      - name: Upload SAM APK
+        uses: actions/upload-artifact@v6
+        with:
+          name: SAM-Advanced-APK-Analyzer-debug
+          path: |
+            ${{ env.PROJECT_DIR }}/output/SAM-Advanced-APK-Analyzer-debug.apk
+            ${{ env.PROJECT_DIR }}/output/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
+
+      # =========================================================
+      # 18. SUCCESS
+      # =========================================================
+
+      - name: Build successful
+        if: success()
+        shell: bash
+        run: |
+          echo
+          echo "=============================================="
+          echo "SAM BUILD SUCCESSFUL"
+          echo "=============================================="
+          echo
+          echo "APK:"
+          echo "SAM-Advanced-APK-Analyzer-debug.apk"
+          echo
+          echo "Artifact:"
+          echo "SAM-Advanced-APK-Analyzer-debug"
