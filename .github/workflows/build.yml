@@ -11,35 +11,234 @@ permissions:
 
 jobs:
   build:
+    name: Build Android APK
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout project
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up JDK 17
+      - name: Setup JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Make Gradle executable
-        run: chmod +x ./gradlew
+      - name: Show repository files
+        shell: bash
+        run: |
+          echo "===== Repository ====="
+          find . -maxdepth 3 -type f | sort
+          echo "======================"
+
+      - name: Find and extract Android project ZIP
+        shell: bash
+        run: |
+          set -e
+
+          ZIP_FILE=""
+
+          if [ -f "tiktok-downloader.zip" ]; then
+            ZIP_FILE="tiktok-downloader.zip"
+          else
+            ZIP_FILE=$(find . -maxdepth 3 -type f -iname "*.zip" | head -n 1 || true)
+          fi
+
+          if [ -z "$ZIP_FILE" ]; then
+            echo "ERROR: No ZIP file found."
+            exit 1
+          fi
+
+          echo "Using ZIP: $ZIP_FILE"
+
+          mkdir -p extracted
+          unzip -q "$ZIP_FILE" -d extracted
+
+          echo "===== Extracted files ====="
+          find extracted -maxdepth 5 -type f | sort
+          echo "==========================="
+
+      - name: Locate Android Gradle project
+        shell: bash
+        run: |
+          set -e
+
+          PROJECT_DIR=""
+
+          # Check extracted directory itself
+          if [ -f "extracted/gradlew" ] || [ -f "extracted/settings.gradle" ] || [ -f "extracted/settings.gradle.kts" ]; then
+            PROJECT_DIR="extracted"
+          fi
+
+          # Search for settings.gradle
+          if [ -z "$PROJECT_DIR" ]; then
+            SETTINGS=$(find extracted -type f \( \
+              -name "settings.gradle" \
+              -o -name "settings.gradle.kts" \
+            \) | head -n 1 || true)
+
+            if [ -n "$SETTINGS" ]; then
+              PROJECT_DIR=$(dirname "$SETTINGS")
+            fi
+          fi
+
+          # Search for gradlew as fallback
+          if [ -z "$PROJECT_DIR" ]; then
+            GRADLEW=$(find extracted -type f -name "gradlew" | head -n 1 || true)
+
+            if [ -n "$GRADLEW" ]; then
+              PROJECT_DIR=$(dirname "$GRADLEW")
+            fi
+          fi
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "ERROR: Android Gradle project was not found."
+            echo ""
+            echo "The ZIP must contain an Android project with:"
+            echo "  settings.gradle or settings.gradle.kts"
+            echo "  build.gradle or build.gradle.kts"
+            echo "  app/"
+            echo ""
+            echo "Extracted contents:"
+            find extracted -maxdepth 6 -print
+            exit 1
+          fi
+
+          PROJECT_DIR=$(realpath "$PROJECT_DIR")
+
+          echo "Android project:"
+          echo "$PROJECT_DIR"
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+      - name: Verify Android project
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          echo "===== Project root ====="
+          ls -la
+          echo "========================"
+
+          if [ ! -d "app" ]; then
+            echo "WARNING: app/ directory was not found at project root."
+          fi
+
+          if [ -f "settings.gradle" ]; then
+            echo "Found settings.gradle"
+          elif [ -f "settings.gradle.kts" ]; then
+            echo "Found settings.gradle.kts"
+          else
+            echo "ERROR: settings.gradle not found."
+            exit 1
+          fi
+
+      - name: Install Gradle Wrapper if missing
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          if [ -f "./gradlew" ]; then
+            echo "Gradle Wrapper already exists."
+            chmod +x ./gradlew
+            exit 0
+          fi
+
+          echo "Gradle Wrapper not found."
+
+          if [ -f "gradle/wrapper/gradle-wrapper.properties" ]; then
+            echo "Wrapper files are partially present."
+          fi
+
+          # Use Gradle installed on the GitHub runner to generate the wrapper.
+          gradle wrapper --gradle-version 9.3.1
+
+          chmod +x ./gradlew
 
       - name: Check Gradle
-        run: ./gradlew --version
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+          ./gradlew --version
+
+      - name: Clean previous build
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+          ./gradlew clean --stacktrace
 
       - name: Build Debug APK
-        run: ./gradlew assembleDebug --stacktrace
-
-      - name: Find APK
+        shell: bash
         run: |
-          echo "APK files:"
-          find app/build/outputs/apk -type f -name "*.apk" -print
+          cd "$PROJECT_DIR"
+
+          ./gradlew assembleDebug \
+            --stacktrace \
+            --no-daemon \
+            --console=plain
+
+      - name: Find generated APK
+        shell: bash
+        run: |
+          set -e
+
+          echo "===== Searching for APK files ====="
+
+          APK_COUNT=$(find "$PROJECT_DIR" \
+            -type f \
+            -name "*.apk" \
+            -path "*/build/outputs/*" \
+            | wc -l)
+
+          echo "APK count: $APK_COUNT"
+
+          if [ "$APK_COUNT" -eq 0 ]; then
+            echo "ERROR: No APK was generated."
+            echo ""
+            echo "Build output:"
+            find "$PROJECT_DIR" \
+              -type f \
+              -path "*/build/outputs/*" \
+              -print || true
+            exit 1
+          fi
+
+          mkdir -p "$GITHUB_WORKSPACE/apk-output"
+
+          INDEX=1
+
+          while IFS= read -r APK; do
+            echo "Found: $APK"
+
+            BASENAME=$(basename "$APK")
+
+            if [ "$INDEX" -eq 1 ]; then
+              cp "$APK" "$GITHUB_WORKSPACE/apk-output/TikTok-Downloader-debug.apk"
+            else
+              cp "$APK" "$GITHUB_WORKSPACE/apk-output/TikTok-Downloader-debug-$INDEX.apk"
+            fi
+
+            INDEX=$((INDEX + 1))
+          done < <(
+            find "$PROJECT_DIR" \
+              -type f \
+              -name "*.apk" \
+              -path "*/build/outputs/*" \
+              | sort
+          )
+
+          echo ""
+          echo "===== APK output ====="
+          ls -lh "$GITHUB_WORKSPACE/apk-output"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: TikTok-Downloader-APK
-          path: app/build/outputs/apk/**/*.apk
+          path: apk-output/*.apk
           if-no-files-found: error
+          retention-days: 30
