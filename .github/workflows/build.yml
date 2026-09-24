@@ -13,62 +13,144 @@ jobs:
   build:
     name: Build APK
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    env:
+      JAVA_VERSION: "17"
+      FALLBACK_GRADLE_VERSION: "9.3.1"
+      GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8"
 
     steps:
 
-      # =====================================================
-      # Checkout
-      # =====================================================
-
+      # =========================================================
+      # CHECKOUT
+      # =========================================================
       - name: Checkout
         uses: actions/checkout@v5
 
-      # =====================================================
-      # Java
-      # =====================================================
-
+      # =========================================================
+      # JAVA
+      # =========================================================
       - name: Setup Java
         uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: ${{ env.JAVA_VERSION }}
 
-      # =====================================================
-      # Android SDK
-      # =====================================================
-
-      - name: Setup Android
+      # =========================================================
+      # ANDROID SDK
+      # =========================================================
+      - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      # =====================================================
-      # Find ZIP
-      # =====================================================
+      # =========================================================
+      # INITIAL DIAGNOSTIC LOG
+      # =========================================================
+      - name: Initialize diagnostics
+        shell: bash
+        run: |
+          set -u
 
-      - name: Find ZIP
+          : > "$GITHUB_WORKSPACE/gradle-build.log"
+
+          {
+            echo "=========================================="
+            echo "TikTok Downloader Android Build"
+            echo "=========================================="
+            echo "Date:"
+            date
+            echo
+            echo "Java:"
+            java -version 2>&1 || true
+            echo
+            echo "Gradle command:"
+            command -v gradle || true
+            echo
+            echo "Android SDK:"
+            echo "${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+            echo
+            echo "PATH:"
+            echo "$PATH"
+            echo
+          } | tee -a "$GITHUB_WORKSPACE/gradle-build.log"
+
+      # =========================================================
+      # ANDROID SDK PACKAGES
+      # =========================================================
+      - name: Prepare Android SDK
         shell: bash
         run: |
           set -e
 
-          if [ -f "tiktok-downloader.zip" ]; then
-            ZIP_FILE="tiktok-downloader.zip"
+          SDKMANAGER=""
+
+          if command -v sdkmanager >/dev/null 2>&1; then
+            SDKMANAGER="$(command -v sdkmanager)"
+          elif [ -x "${ANDROID_HOME:-$ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager" ]; then
+            SDKMANAGER="${ANDROID_HOME:-$ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager"
+          elif [ -x "${ANDROID_HOME:-$ANDROID_SDK_ROOT}/cmdline-tools/bin/sdkmanager" ]; then
+            SDKMANAGER="${ANDROID_HOME:-$ANDROID_SDK_ROOT}/cmdline-tools/bin/sdkmanager"
+          fi
+
+          if [ -n "$SDKMANAGER" ]; then
+            echo "Using sdkmanager: $SDKMANAGER"
+
+            yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+
+            "$SDKMANAGER" \
+              "platform-tools" \
+              "platforms;android-36" \
+              "build-tools;36.0.0" \
+              || true
+
           else
-            ZIP_FILE="$(find . -type f -iname "*.zip" | head -n 1)"
+            echo "sdkmanager not found."
+            echo "Using preinstalled Android SDK packages."
+          fi
+
+      # =========================================================
+      # FIND ZIP
+      # =========================================================
+      - name: Find TikTok ZIP
+        shell: bash
+        run: |
+          set -e
+
+          ZIP_FILE=""
+
+          if [ -f "$GITHUB_WORKSPACE/tiktok-downloader.zip" ]; then
+            ZIP_FILE="$GITHUB_WORKSPACE/tiktok-downloader.zip"
+          else
+            ZIP_FILE="$(
+              find "$GITHUB_WORKSPACE" \
+                -type f \
+                \( -iname "tiktok-downloader.zip" -o -iname "*.zip" \) \
+                -not -path "*/.git/*" \
+                | head -n 1
+            )"
           fi
 
           if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: tiktok-downloader.zip not found."
+            echo "ERROR: tiktok-downloader.zip was not found."
+
+            echo
+            echo "Repository files:"
+            find "$GITHUB_WORKSPACE" \
+              -maxdepth 4 \
+              -type f \
+              | sort
+
             exit 1
           fi
 
           echo "ZIP_FILE=$ZIP_FILE" >> "$GITHUB_ENV"
 
-          echo "Using:"
+          echo "Found ZIP:"
           echo "$ZIP_FILE"
 
-      # =====================================================
-      # Extract
-      # =====================================================
-
+      # =========================================================
+      # EXTRACT
+      # =========================================================
       - name: Extract project
         shell: bash
         run: |
@@ -78,22 +160,21 @@ jobs:
 
           mkdir -p "$GITHUB_WORKSPACE/android-project"
 
-          unzip -q "$ZIP_FILE" \
+          unzip -q \
+            "$ZIP_FILE" \
             -d "$GITHUB_WORKSPACE/android-project"
 
-          echo "Project extracted."
+          echo "ZIP extracted successfully."
 
-      # =====================================================
-      # Locate Gradle project
-      # =====================================================
-
-      - name: Locate project
+      # =========================================================
+      # LOCATE ANDROID PROJECT
+      # =========================================================
+      - name: Locate Android project
         shell: bash
         run: |
           set -e
 
           ROOT="$GITHUB_WORKSPACE/android-project"
-
           PROJECT=""
 
           SETTINGS="$(
@@ -127,11 +208,13 @@ jobs:
           fi
 
           if [ -z "$PROJECT" ]; then
-            echo "ERROR: Android Gradle project not found."
-
+            echo "ERROR: Android Gradle project was not found."
             echo
-            echo "ZIP CONTENTS:"
-            find "$ROOT" -maxdepth 10 -print | sort
+            echo "ZIP contents:"
+            find "$ROOT" \
+              -maxdepth 10 \
+              -print \
+              | sort
 
             exit 1
           fi
@@ -140,14 +223,13 @@ jobs:
 
           echo "PROJECT_DIR=$PROJECT" >> "$GITHUB_ENV"
 
-          echo "PROJECT:"
+          echo "Android project:"
           echo "$PROJECT"
 
-      # =====================================================
-      # Detect application module
-      # =====================================================
-
-      - name: Detect app module
+      # =========================================================
+      # FIND APP MODULE
+      # =========================================================
+      - name: Locate app module
         shell: bash
         run: |
           set -e
@@ -170,10 +252,11 @@ jobs:
             )"
 
             if [ -n "$MANIFEST" ]; then
-              MODULE="$(dirname \
-                "$(dirname \
-                  "$(dirname "$MANIFEST")"
-                )"
+              MODULE="$(
+                dirname \
+                  "$(dirname \
+                    "$(dirname "$MANIFEST")" \
+                  )"
               )"
 
               MODULE="${MODULE#./}"
@@ -183,10 +266,17 @@ jobs:
           if [ -z "$MODULE" ]; then
             echo "ERROR: Android app module not found."
 
-            find . -maxdepth 8 -type d | sort
+            echo
+            echo "Project structure:"
+            find . \
+              -maxdepth 8 \
+              -type d \
+              | sort
 
             exit 1
           fi
+
+          echo "APP_MODULE=$MODULE" >> "$GITHUB_ENV"
 
           if [ "$MODULE" = "app" ]; then
             BUILD_TASK="assembleDebug"
@@ -195,196 +285,121 @@ jobs:
             BUILD_TASK=":${MODULE_TASK}:assembleDebug"
           fi
 
-          echo "APP_MODULE=$MODULE" >> "$GITHUB_ENV"
           echo "BUILD_TASK=$BUILD_TASK" >> "$GITHUB_ENV"
 
-          echo "MODULE:"
+          echo "App module:"
           echo "$MODULE"
 
-          echo "TASK:"
+          echo "Build task:"
           echo "$BUILD_TASK"
 
-      # =====================================================
-      # Detect AGP
-      # =====================================================
-
-      - name: Detect AGP
+      # =========================================================
+      # USE PROJECT WRAPPER WHEN AVAILABLE
+      # =========================================================
+      - name: Detect Gradle
         shell: bash
         run: |
           set -e
 
           cd "$PROJECT_DIR"
 
-          AGP=""
+          if [ -f "./gradlew" ]; then
+            chmod +x "./gradlew"
 
-          # buildscript dependency
-          AGP="$(
-            grep -RhoE \
-              'com\.android\.tools\.build:gradle:[0-9]+\.[0-9]+(\.[0-9]+)?' \
-              . \
-              --include='*.gradle' \
-              --include='*.gradle.kts' \
-              2>/dev/null \
-              | sed 's/.*://' \
-              | sort -V \
-              | tail -n 1 \
-              || true
-          )"
+            echo "GRADLE_MODE=wrapper" >> "$GITHUB_ENV"
+            echo "Gradle mode: project wrapper"
 
-          # plugins syntax
-          if [ -z "$AGP" ]; then
-            AGP="$(
-              grep -RhoE \
-                'com\.android\.(application|library)[^[:cntrl:]\r\n]*version[[:space:]]*["'\''][0-9]+\.[0-9]+(\.[0-9]+)?["'\'']' \
-                . \
-                --include='*.gradle' \
-                --include='*.gradle.kts' \
-                2>/dev/null \
-                | grep -oE \
-                  '[0-9]+\.[0-9]+(\.[0-9]+)?' \
-                | sort -V \
-                | tail -n 1 \
-                || true
-            )"
-          fi
-
-          if [ -z "$AGP" ]; then
-            echo "WARNING: AGP not detected."
-            echo "Using Gradle 8.13."
-            AGP="unknown"
-            GRADLE="8.13"
           else
+            echo "GRADLE_MODE=system" >> "$GITHUB_ENV"
+            echo "GRADLE_MODE=system" >> "$GITHUB_ENV"
 
-            MAJOR_MINOR="$(echo "$AGP" | cut -d. -f1,2)"
-
-            case "$MAJOR_MINOR" in
-
-              9.4)
-                GRADLE="9.6.0"
-                ;;
-
-              9.3)
-                GRADLE="9.5.0"
-                ;;
-
-              9.2)
-                GRADLE="9.4.1"
-                ;;
-
-              9.1)
-                GRADLE="9.3.1"
-                ;;
-
-              9.0)
-                GRADLE="9.1.0"
-                ;;
-
-              8.13)
-                GRADLE="8.13"
-                ;;
-
-              8.12)
-                GRADLE="8.13"
-                ;;
-
-              8.11)
-                GRADLE="8.13"
-                ;;
-
-              8.10)
-                GRADLE="8.11.1"
-                ;;
-
-              8.9)
-                GRADLE="8.11.1"
-                ;;
-
-              8.8)
-                GRADLE="8.10.2"
-                ;;
-
-              8.7)
-                GRADLE="8.9"
-                ;;
-
-              8.6)
-                GRADLE="8.7"
-                ;;
-
-              8.5)
-                GRADLE="8.7"
-                ;;
-
-              8.4)
-                GRADLE="8.6"
-                ;;
-
-              8.3)
-                GRADLE="8.4"
-                ;;
-
-              8.2)
-                GRADLE="8.2"
-                ;;
-
-              8.1)
-                GRADLE="8.0"
-                ;;
-
-              8.0)
-                GRADLE="8.0"
-                ;;
-
-              7.4)
-                GRADLE="7.5"
-                ;;
-
-              7.3)
-                GRADLE="7.4"
-                ;;
-
-              7.2)
-                GRADLE="7.3.3"
-                ;;
-
-              7.1)
-                GRADLE="7.2"
-                ;;
-
-              7.0)
-                GRADLE="7.0"
-                ;;
-
-              *)
-                echo "ERROR: Unsupported AGP: $AGP"
-                exit 1
-                ;;
-
-            esac
+            echo "Gradle mode: system"
+            echo "Required fallback Gradle: $FALLBACK_GRADLE_VERSION"
           fi
 
-          echo "AGP_VERSION=$AGP" >> "$GITHUB_ENV"
-          echo "GRADLE_VERSION=$GRADLE" >> "$GITHUB_ENV"
-
-          echo "AGP:"
-          echo "$AGP"
-
-          echo "Gradle:"
-          echo "$GRADLE"
-
-      # =====================================================
-      # Setup Gradle
-      # =====================================================
-
-      - name: Setup Gradle
+      # =========================================================
+      # FALLBACK GRADLE
+      # =========================================================
+      - name: Setup fallback Gradle
+        if: env.GRADLE_MODE == 'system'
         uses: gradle/actions/setup-gradle@v5
         with:
-          gradle-version: ${{ env.GRADLE_VERSION }}
+          gradle-version: ${{ env.FALLBACK_GRADLE_VERSION }}
 
-      # =====================================================
-      # Build
-      # =====================================================
+      # =========================================================
+      # PROJECT INFORMATION
+      # =========================================================
+      - name: Inspect project
+        shell: bash
+        run: |
+          set -e
 
+          cd "$PROJECT_DIR"
+
+          {
+            echo
+            echo "=========================================="
+            echo "PROJECT INSPECTION"
+            echo "=========================================="
+
+            echo
+            echo "Project:"
+            pwd
+
+            echo
+            echo "Gradle files:"
+            find . \
+              -maxdepth 5 \
+              -type f \
+              \( \
+                -name "build.gradle" \
+                -o \
+                -name "build.gradle.kts" \
+                -o \
+                -name "settings.gradle" \
+                -o \
+                -name "settings.gradle.kts" \
+                -o \
+                -name "gradle-wrapper.properties" \
+              \) \
+              | sort
+
+            echo
+            echo "Wrapper:"
+            if [ -f "./gradlew" ]; then
+              echo "present"
+            else
+              echo "not present"
+            fi
+
+            echo
+            echo "AGP declarations:"
+            grep -RhnE \
+              "com\.android\.(application|library)|com\.android\.tools\.build:gradle" \
+              . \
+              --include="*.gradle" \
+              --include="*.gradle.kts" \
+              --include="*.toml" \
+              2>/dev/null \
+              | head -n 30 \
+              || true
+
+            echo
+            echo "Compile SDK:"
+            grep -RhnE \
+              "compileSdk(Version)?[[:space:]]*=?[[:space:]]*[0-9]+" \
+              . \
+              --include="*.gradle" \
+              --include="*.gradle.kts" \
+              2>/dev/null \
+              | head -n 20 \
+              || true
+
+          } | tee -a "$GITHUB_WORKSPACE/gradle-build.log"
+
+      # =========================================================
+      # BUILD
+      # =========================================================
       - name: Build Debug APK
         shell: bash
         run: |
@@ -392,32 +407,44 @@ jobs:
 
           cd "$PROJECT_DIR"
 
-          touch "$GITHUB_WORKSPACE/gradle-build.log"
+          {
+            echo
+            echo "=========================================="
+            echo "STARTING BUILD"
+            echo "=========================================="
+            echo "Project: $PROJECT_DIR"
+            echo "Module: $APP_MODULE"
+            echo "Task: $BUILD_TASK"
+            echo "Gradle mode: $GRADLE_MODE"
+            echo
 
-          echo "=========================================="
-          echo "BUILD"
-          echo "=========================================="
+          } | tee -a "$GITHUB_WORKSPACE/gradle-build.log"
 
-          echo "Project: $PROJECT_DIR"
-          echo "Module: $APP_MODULE"
-          echo "Task: $BUILD_TASK"
-          echo "AGP: $AGP_VERSION"
-          echo "Gradle: $GRADLE_VERSION"
+          if [ "$GRADLE_MODE" = "wrapper" ]; then
 
-          echo
+            ./gradlew \
+              "$BUILD_TASK" \
+              --no-daemon \
+              --stacktrace \
+              --warning-mode all \
+              --console=plain \
+              2>&1 | tee -a "$GITHUB_WORKSPACE/gradle-build.log"
 
-          gradle "$BUILD_TASK" \
-            --no-daemon \
-            --stacktrace \
-            --info \
-            --warning-mode all \
-            --console=plain \
-            2>&1 | tee "$GITHUB_WORKSPACE/gradle-build.log"
+          else
 
-      # =====================================================
-      # Find APK
-      # =====================================================
+            gradle \
+              "$BUILD_TASK" \
+              --no-daemon \
+              --stacktrace \
+              --warning-mode all \
+              --console=plain \
+              2>&1 | tee -a "$GITHUB_WORKSPACE/gradle-build.log"
 
+          fi
+
+      # =========================================================
+      # FIND APK
+      # =========================================================
       - name: Find APK
         if: success()
         shell: bash
@@ -450,7 +477,7 @@ jobs:
             echo "ERROR: APK was not generated."
 
             echo
-            echo "OUTPUT:"
+            echo "Build outputs:"
             find "$PROJECT_DIR" \
               -path "*/build/outputs/*" \
               -print \
@@ -463,13 +490,12 @@ jobs:
             "$GITHUB_WORKSPACE/apk-output/TikTok-Downloader-debug.apk"
 
           echo
-          echo "APK:"
+          echo "APK generated:"
           ls -lh "$GITHUB_WORKSPACE/apk-output/"
 
-      # =====================================================
-      # Upload APK
-      # =====================================================
-
+      # =========================================================
+      # UPLOAD APK
+      # =========================================================
       - name: Upload APK
         if: success()
         uses: actions/upload-artifact@v4
@@ -479,15 +505,14 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      # =====================================================
-      # Always create/upload log
-      # =====================================================
-
-      - name: Upload Gradle log
+      # =========================================================
+      # ALWAYS UPLOAD LOG
+      # =========================================================
+      - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: TikTok-Downloader-Gradle-Log
+          name: TikTok-Downloader-Build-Log
           path: gradle-build.log
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 14
