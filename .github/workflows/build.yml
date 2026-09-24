@@ -2,6 +2,7 @@ name: Build TikTok Downloader APK
 
 on:
   workflow_dispatch:
+
   push:
     branches:
       - main
@@ -11,62 +12,74 @@ permissions:
 
 env:
   JAVA_VERSION: "17"
+  DEFAULT_GRADLE_VERSION: "8.13"
+  DEFAULT_COMPILE_SDK: "35"
+  GRADLE_OPTS: "-Xmx4g -Dfile.encoding=UTF-8"
 
 jobs:
   build:
     name: Build Android APK
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+
+    timeout-minutes: 40
 
     steps:
 
-      # ==========================================================
-      # 1. CHECKOUT
-      # ==========================================================
+      # ============================================================
+      # 01. CHECKOUT
+      # ============================================================
 
-      - name: Checkout repository
+      - name: "01 - Checkout repository"
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
 
-      # ==========================================================
-      # 2. JAVA
-      #
-      # IMPORTANT:
-      # No Gradle cache here.
-      #
-      # The Android project is inside tiktok-downloader.zip,
-      # so setup-java must not search for Gradle files before
-      # the ZIP is extracted.
-      # ==========================================================
 
-      - name: Setup Java 17
+      # ============================================================
+      # 02. JAVA 17
+      #
+      # مهم:
+      # لا نستخدم cache: gradle هنا.
+      # المشروع موجود داخل ZIP وليس في جذر المستودع.
+      # ============================================================
+
+      - name: "02 - Setup Java 17"
         uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "17"
 
-      # ==========================================================
-      # 3. ANDROID SDK
-      # ==========================================================
 
-      - name: Setup Android SDK
+      # ============================================================
+      # 03. ANDROID SDK
+      # ============================================================
+
+      - name: "03 - Setup Android SDK"
         uses: android-actions/setup-android@v4
+        with:
+          packages: "platform-tools"
 
-      # ==========================================================
-      # 4. CHECK RUNNER
-      # ==========================================================
 
-      - name: Inspect runner
+      # ============================================================
+      # 04. RUNNER INFORMATION
+      # ============================================================
+
+      - name: "04 - Inspect runner"
         shell: bash
         run: |
-          set -euo pipefail
+          set -u
 
-          echo "=================================================="
-          echo "RUNNER"
-          echo "=================================================="
+          echo "============================================================"
+          echo "RUNNER INFORMATION"
+          echo "============================================================"
 
           echo ""
-          echo "OS:"
-          uname -a
+          echo "Operating system:"
+          cat /etc/os-release || true
+
+          echo ""
+          echo "Kernel:"
+          uname -a || true
 
           echo ""
           echo "Java:"
@@ -77,206 +90,207 @@ jobs:
           echo "${JAVA_HOME:-unknown}"
 
           echo ""
-          echo "ANDROID_HOME:"
-          echo "${ANDROID_HOME:-unknown}"
+          echo "Android SDK:"
+          echo "ANDROID_HOME=${ANDROID_HOME:-unknown}"
+          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-unknown}"
 
           echo ""
-          echo "ANDROID_SDK_ROOT:"
-          echo "${ANDROID_SDK_ROOT:-unknown}"
+          echo "sdkmanager:"
+          sdkmanager --version || true
 
           echo ""
-          echo "Repository:"
-          find . -maxdepth 5 -type f -print | sort
+          echo "adb:"
+          adb version || true
 
-      # ==========================================================
-      # 5. FIND ZIP
-      # ==========================================================
+          echo ""
+          echo "Disk:"
+          df -h || true
 
-      - name: Find TikTok Downloader ZIP
+          echo ""
+          echo "Memory:"
+          free -h || true
+
+          echo ""
+          echo "Gradle already available:"
+          gradle --version || true
+
+
+      # ============================================================
+      # 05. FIND ZIP
+      # ============================================================
+
+      - name: "05 - Locate TikTok Downloader ZIP"
         shell: bash
         run: |
           set -euo pipefail
 
           ZIP_FILE=""
 
-          if [ -f "./tiktok-downloader.zip" ]; then
-            ZIP_FILE="./tiktok-downloader.zip"
+          if [ -f "$GITHUB_WORKSPACE/tiktok-downloader.zip" ]; then
+            ZIP_FILE="$GITHUB_WORKSPACE/tiktok-downloader.zip"
           else
             ZIP_FILE="$(
-              find . \
+              find "$GITHUB_WORKSPACE" \
                 -type f \
-                -iname "*.zip" \
-                -not -path "./.git/*" \
-                | sort \
-                | head -n 1 \
-                || true
+                \( \
+                  -iname 'tiktok-downloader.zip' \
+                  -o \
+                  -iname '*.zip' \
+                \) \
+                -not -path '*/.git/*' \
+                -print \
+                -quit \
+                2>/dev/null || true
             )"
           fi
 
           if [ -z "$ZIP_FILE" ]; then
+            echo "::error::tiktok-downloader.zip was not found."
+
             echo ""
-            echo "ERROR: No ZIP file was found."
-            echo ""
-            echo "Repository tree:"
-            find . -maxdepth 10 -print | sort
+            echo "Repository contents:"
+            find "$GITHUB_WORKSPACE" \
+              -maxdepth 6 \
+              -type f \
+              -print \
+              | sort
+
             exit 1
           fi
 
-          echo ""
-          echo "ZIP FILE:"
-          echo "$ZIP_FILE"
+          if [ ! -f "$ZIP_FILE" ]; then
+            echo "::error::ZIP path does not exist: $ZIP_FILE"
+            exit 1
+          fi
 
           echo "ZIP_FILE=$ZIP_FILE" >> "$GITHUB_ENV"
 
-      # ==========================================================
-      # 6. VALIDATE ZIP
-      # ==========================================================
-
-      - name: Validate ZIP
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [ ! -f "$ZIP_FILE" ]; then
-            echo "ERROR: ZIP does not exist."
-            exit 1
-          fi
-
-          echo "=================================================="
-          echo "ZIP INFORMATION"
-          echo "=================================================="
-
-          ls -lh "$ZIP_FILE"
+          echo ""
+          echo "ZIP found:"
+          echo "$ZIP_FILE"
 
           echo ""
-          echo "ZIP CONTENTS:"
-          unzip -l "$ZIP_FILE" | sed -n '1,400p'
+          ls -lh "$ZIP_FILE"
 
-      # ==========================================================
-      # 7. EXTRACT ZIP
-      # ==========================================================
 
-      - name: Extract Android project
+      # ============================================================
+      # 06. TEST ZIP
+      # ============================================================
+
+      - name: "06 - Validate ZIP archive"
         shell: bash
         run: |
           set -euo pipefail
 
-          rm -rf "$GITHUB_WORKSPACE/android-project"
+          echo "Testing ZIP integrity..."
+          unzip -t "$ZIP_FILE"
 
-          mkdir -p "$GITHUB_WORKSPACE/android-project"
+          echo ""
+          echo "ZIP is valid."
 
-          unzip -q \
-            "$ZIP_FILE" \
-            -d "$GITHUB_WORKSPACE/android-project"
 
-          echo "=================================================="
-          echo "EXTRACTED PROJECT"
-          echo "=================================================="
+      # ============================================================
+      # 07. EXTRACT PROJECT
+      # ============================================================
 
-          find "$GITHUB_WORKSPACE/android-project" \
-            -maxdepth 12 \
+      - name: "07 - Extract Android project"
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJECT_EXTRACT_DIR="$GITHUB_WORKSPACE/android-project"
+
+          rm -rf "$PROJECT_EXTRACT_DIR"
+
+          mkdir -p "$PROJECT_EXTRACT_DIR"
+
+          echo "Extracting:"
+          echo "$ZIP_FILE"
+
+          unzip -q "$ZIP_FILE" \
+            -d "$PROJECT_EXTRACT_DIR"
+
+          echo ""
+          echo "Extraction completed."
+
+          echo ""
+          echo "Extracted files:"
+          find "$PROJECT_EXTRACT_DIR" \
+            -maxdepth 10 \
             -type f \
             -print \
             | sort
 
-      # ==========================================================
-      # 8. LOCATE GRADLE ROOT
-      # ==========================================================
 
-      - name: Locate Gradle project
+      # ============================================================
+      # 08. FIND GRADLE ROOT
+      # ============================================================
+
+      - name: "08 - Locate Gradle project"
         shell: bash
         run: |
           set -euo pipefail
 
-          ROOT="$GITHUB_WORKSPACE/android-project"
+          SEARCH_ROOT="$GITHUB_WORKSPACE/android-project"
 
           PROJECT_DIR=""
 
-          # ------------------------------------------------------
-          # Search settings.gradle
-          # ------------------------------------------------------
+          echo "Searching for settings.gradle..."
 
           SETTINGS_FILE="$(
-            find "$ROOT" \
+            find "$SEARCH_ROOT" \
               -type f \
               \( \
-                -name "settings.gradle" \
+                -name 'settings.gradle' \
                 -o \
-                -name "settings.gradle.kts" \
+                -name 'settings.gradle.kts' \
               \) \
-              | sort \
-              | head -n 1 \
-              || true
+              -print \
+              -quit \
+              2>/dev/null || true
           )"
 
           if [ -n "$SETTINGS_FILE" ]; then
             PROJECT_DIR="$(dirname "$SETTINGS_FILE")"
           fi
 
-          # ------------------------------------------------------
-          # Search gradlew
-          # ------------------------------------------------------
-
           if [ -z "$PROJECT_DIR" ]; then
 
+            echo "settings.gradle not found."
+
+            echo "Searching for gradlew..."
+
             GRADLEW_FILE="$(
-              find "$ROOT" \
+              find "$SEARCH_ROOT" \
                 -type f \
-                -name "gradlew" \
-                | sort \
-                | head -n 1 \
-                || true
+                -name 'gradlew' \
+                -print \
+                -quit \
+                2>/dev/null || true
             )"
 
             if [ -n "$GRADLEW_FILE" ]; then
               PROJECT_DIR="$(dirname "$GRADLEW_FILE")"
             fi
-
           fi
-
-          # ------------------------------------------------------
-          # Search build.gradle
-          # ------------------------------------------------------
-
-          if [ -z "$PROJECT_DIR" ]; then
-
-            BUILD_FILE="$(
-              find "$ROOT" \
-                -type f \
-                \( \
-                  -name "build.gradle" \
-                  -o \
-                  -name "build.gradle.kts" \
-                \) \
-                | sort \
-                | head -n 1 \
-                || true
-            )"
-
-            if [ -n "$BUILD_FILE" ]; then
-
-              CANDIDATE="$(dirname "$BUILD_FILE")"
-
-              if [ -d "$CANDIDATE/app" ]; then
-                PROJECT_DIR="$CANDIDATE"
-              fi
-
-            fi
-
-          fi
-
-          # ------------------------------------------------------
-          # Validate
-          # ------------------------------------------------------
 
           if [ -z "$PROJECT_DIR" ]; then
 
             echo ""
-            echo "ERROR: Android Gradle project was not found."
+            echo "::error::No Gradle project found."
 
             echo ""
-            echo "Complete extracted tree:"
-            find "$ROOT" -maxdepth 15 -print | sort
+            echo "Expected:"
+            echo " - settings.gradle"
+            echo " - settings.gradle.kts"
+            echo " - gradlew"
+
+            echo ""
+            echo "Extracted directory:"
+            find "$SEARCH_ROOT" \
+              -maxdepth 12 \
+              -print \
+              | sort
 
             exit 1
           fi
@@ -284,66 +298,21 @@ jobs:
           PROJECT_DIR="$(realpath "$PROJECT_DIR")"
 
           echo ""
-          echo "=================================================="
-          echo "GRADLE PROJECT"
-          echo "=================================================="
+          echo "============================================================"
+          echo "GRADLE PROJECT FOUND"
+          echo "============================================================"
 
           echo "$PROJECT_DIR"
 
+          echo ""
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-      # ==========================================================
-      # 9. INSPECT PROJECT
-      # ==========================================================
 
-      - name: Inspect Android project
-        shell: bash
-        run: |
-          set -euo pipefail
+      # ============================================================
+      # 09. FIND APP MODULE
+      # ============================================================
 
-          cd "$PROJECT_DIR"
-
-          echo "=================================================="
-          echo "ANDROID PROJECT"
-          echo "=================================================="
-
-          echo ""
-          echo "Project root:"
-          pwd
-
-          echo ""
-          echo "Root:"
-          ls -la
-
-          echo ""
-          echo "Gradle files:"
-
-          find . \
-            -maxdepth 10 \
-            -type f \
-            \( \
-              -name "build.gradle" \
-              -o \
-              -name "build.gradle.kts" \
-              -o \
-              -name "settings.gradle" \
-              -o \
-              -name "settings.gradle.kts" \
-              -o \
-              -name "gradle.properties" \
-              -o \
-              -name "libs.versions.toml" \
-              -o \
-              -name "gradle-wrapper.properties" \
-            \) \
-            -print \
-            | sort
-
-      # ==========================================================
-      # 10. FIND APP MODULE
-      # ==========================================================
-
-      - name: Find Android app module
+      - name: "09 - Locate Android application module"
         shell: bash
         run: |
           set -euo pipefail
@@ -352,382 +321,1044 @@ jobs:
 
           APP_MODULE=""
 
-          # Standard Android module
-          if [ -d "./app" ]; then
-            APP_MODULE="$(realpath "./app")"
+          # الحالة القياسية:
+          # project/app
+          if [ -d "app" ] && [ -f "app/src/main/AndroidManifest.xml" ]; then
+            APP_MODULE="app"
           fi
 
-          # Search manifest if app/ does not exist
+          # إذا لم يوجد app:
+          # ابحث عن AndroidManifest
           if [ -z "$APP_MODULE" ]; then
 
-            MANIFEST="$(
+            MANIFEST_FILE="$(
               find . \
                 -type f \
-                -path "*/src/main/AndroidManifest.xml" \
-                | sort \
-                | head -n 1 \
-                || true
+                -path '*/src/main/AndroidManifest.xml' \
+                -print \
+                -quit \
+                2>/dev/null || true
             )"
 
-            if [ -n "$MANIFEST" ]; then
-              APP_MODULE="$(realpath "$(dirname "$(dirname "$(dirname "$MANIFEST")")")")"
-            fi
+            if [ -n "$MANIFEST_FILE" ]; then
 
+              APP_MODULE="$(
+                dirname \
+                  "$(dirname \
+                    "$(dirname "$MANIFEST_FILE")")"
+              )"
+
+              APP_MODULE="${APP_MODULE#./}"
+            fi
           fi
 
           if [ -z "$APP_MODULE" ]; then
 
-            echo ""
-            echo "ERROR: Android app module was not found."
+            echo "::error::Android application module was not found."
 
             echo ""
             echo "Project directories:"
-            find . -maxdepth 10 -type d -print | sort
+            find . \
+              -maxdepth 8 \
+              -type d \
+              -print \
+              | sort
 
             exit 1
           fi
 
-          echo ""
-          echo "APP MODULE:"
-          echo "$APP_MODULE"
-
           echo "APP_MODULE=$APP_MODULE" >> "$GITHUB_ENV"
 
-      # ==========================================================
-      # 11. DETECT GRADLE WRAPPER
-      #
-      # We DO NOT overwrite an existing project wrapper.
-      # ==========================================================
+          echo ""
+          echo "Android application module:"
+          echo "$APP_MODULE"
 
-      - name: Detect Gradle Wrapper
+
+      # ============================================================
+      # 10. PROJECT INSPECTION
+      # ============================================================
+
+      - name: "10 - Inspect Android project"
         shell: bash
         run: |
           set -euo pipefail
 
           cd "$PROJECT_DIR"
 
-          if [ -f "./gradlew" ]; then
+          echo "============================================================"
+          echo "PROJECT INSPECTION"
+          echo "============================================================"
 
-            echo "=================================================="
-            echo "EXISTING GRADLE WRAPPER FOUND"
-            echo "=================================================="
+          echo ""
+          echo "Project directory:"
+          pwd
+
+          echo ""
+          echo "Root files:"
+          ls -la
+
+          echo ""
+          echo "Gradle files:"
+          find . \
+            -type f \
+            \( \
+              -name 'build.gradle' \
+              -o \
+              -name 'build.gradle.kts' \
+              -o \
+              -name 'settings.gradle' \
+              -o \
+              -name 'settings.gradle.kts' \
+              -o \
+              -name 'gradle.properties' \
+              -o \
+              -name 'libs.versions.toml' \
+            \) \
+            -print \
+            | sort
+
+          echo ""
+          echo "Android manifests:"
+          find . \
+            -type f \
+            -path '*/src/main/AndroidManifest.xml' \
+            -print \
+            | sort
+
+          echo ""
+          echo "Gradle wrapper:"
+          if [ -f "gradlew" ]; then
+            ls -lh gradlew
+          else
+            echo "No gradlew found."
+          fi
+
+          echo ""
+          echo "Wrapper properties:"
+          if [ -f "gradle/wrapper/gradle-wrapper.properties" ]; then
+            cat gradle/wrapper/gradle-wrapper.properties
+          else
+            echo "No gradle-wrapper.properties."
+          fi
+
+
+      # ============================================================
+      # 11. DETECT GRADLE WRAPPER
+      #
+      # لا نستبدل Wrapper موجود.
+      # ============================================================
+
+      - name: "11 - Detect Gradle wrapper"
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          HAS_WRAPPER="false"
+
+          GRADLE_VERSION="$DEFAULT_GRADLE_VERSION"
+
+          GRADLE_CMD="gradle"
+
+          if [ -f "./gradlew" ] \
+             && [ -f "./gradle/wrapper/gradle-wrapper.properties" ]; then
+
+            HAS_WRAPPER="true"
 
             chmod +x ./gradlew
 
-            echo ""
-            echo "Wrapper:"
-            ls -lh ./gradlew
+            GRADLE_CMD="./gradlew"
 
-            if [ -f "./gradle/wrapper/gradle-wrapper.properties" ]; then
-              echo ""
-              echo "gradle-wrapper.properties:"
-              cat ./gradle/wrapper/gradle-wrapper.properties
+            WRAPPER_URL="$(
+              sed \
+                -n \
+                's/^distributionUrl=//p' \
+                gradle/wrapper/gradle-wrapper.properties \
+                | head -n 1 \
+                || true
+            )"
+
+            if [[ "$WRAPPER_URL" =~ gradle-([0-9][0-9A-Za-z.+-]*)-(bin|all)\.zip ]]; then
+              GRADLE_VERSION="${BASH_REMATCH[1]}"
             fi
-
-            echo "HAS_WRAPPER=true" >> "$GITHUB_ENV"
-
-          else
-
-            echo "=================================================="
-            echo "NO GRADLE WRAPPER"
-            echo "=================================================="
-
-            echo "HAS_WRAPPER=false" >> "$GITHUB_ENV"
-
           fi
 
-      # ==========================================================
-      # 12. SETUP GRADLE
-      #
-      # No forced Gradle version here.
-      #
-      # setup-gradle will use the project's wrapper when present.
-      # ==========================================================
+          echo "HAS_WRAPPER=$HAS_WRAPPER" >> "$GITHUB_ENV"
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v6
-        with:
-          add-job-summary: on-failure
+          echo "GRADLE_VERSION=$GRADLE_VERSION" >> "$GITHUB_ENV"
 
-      # ==========================================================
-      # 13. CREATE WRAPPER ONLY IF MISSING
-      # ==========================================================
-
-      - name: Create Gradle Wrapper if missing
-        if: env.HAS_WRAPPER == 'false'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cd "$PROJECT_DIR"
-
-          echo "No wrapper exists."
-
-          echo "Trying Gradle installed on runner..."
-
-          gradle --version
-
-          gradle wrapper \
-            --distribution-type bin
-
-          chmod +x ./gradlew
+          echo "GRADLE_CMD=$GRADLE_CMD" >> "$GITHUB_ENV"
 
           echo ""
-          echo "Generated wrapper:"
-          cat ./gradle/wrapper/gradle-wrapper.properties
+          echo "HAS_WRAPPER:"
+          echo "$HAS_WRAPPER"
 
-      # ==========================================================
-      # 14. VERIFY WRAPPER
-      # ==========================================================
+          echo ""
+          echo "GRADLE_VERSION:"
+          echo "$GRADLE_VERSION"
 
-      - name: Verify Gradle
+          echo ""
+          echo "GRADLE_CMD:"
+          echo "$GRADLE_CMD"
+
+
+      # ============================================================
+      # 12. INSTALL EXACT GRADLE VERSION
+      #
+      # إذا كان المشروع يملك Wrapper:
+      # نستخدم نفس النسخة.
+      #
+      # إذا لا يوجد Wrapper:
+      # نستخدم النسخة الافتراضية فقط كحل احتياطي.
+      # ============================================================
+
+      - name: "12 - Setup Gradle"
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: ${{ env.GRADLE_VERSION }}
+          cache-read-only: false
+          validate-wrappers: true
+          add-job-summary: on-failure
+
+
+      # ============================================================
+      # 13. DETECT PLUGINS
+      # ============================================================
+
+      - name: "13 - Detect Android Kotlin and KSP versions"
+        shell: bash
+        run: |
+          set -u
+
+          cd "$PROJECT_DIR"
+
+          echo "============================================================"
+          echo "PLUGIN DETECTION"
+          echo "============================================================"
+
+          echo ""
+          echo "Android Gradle Plugin:"
+          grep -RInE \
+            'com\.android\.(application|library).*version|com\.android\.tools\.build:gradle:' \
+            . \
+            --include='*.gradle' \
+            --include='*.gradle.kts' \
+            --include='*.toml' \
+            2>/dev/null \
+            | head -n 100 \
+            || true
+
+          echo ""
+          echo "Kotlin:"
+          grep -RInE \
+            'org\.jetbrains\.kotlin|kotlin\("android"\)|kotlin-android' \
+            . \
+            --include='*.gradle' \
+            --include='*.gradle.kts' \
+            --include='*.toml' \
+            2>/dev/null \
+            | head -n 100 \
+            || true
+
+          echo ""
+          echo "KSP:"
+          grep -RInE \
+            'com\.google\.devtools\.ksp|symbol-processing|[[:space:]]ksp[[:space:](=:]' \
+            . \
+            --include='*.gradle' \
+            --include='*.gradle.kts' \
+            --include='*.toml' \
+            2>/dev/null \
+            | head -n 100 \
+            || true
+
+
+      # ============================================================
+      # 14. DETECT COMPILE SDK
+      # ============================================================
+
+      - name: "14 - Detect Android SDK requirements"
         shell: bash
         run: |
           set -euo pipefail
 
           cd "$PROJECT_DIR"
 
-          chmod +x ./gradlew
+          COMPILE_SDK="$DEFAULT_COMPILE_SDK"
 
-          echo "=================================================="
-          echo "GRADLE VERSION"
-          echo "=================================================="
+          BUILD_TOOLS=""
 
-          ./gradlew --version
+          NDK_VERSION=""
 
-      # ==========================================================
-      # 15. DETECT compileSdk
-      # ==========================================================
+          CMAKE_VERSION=""
 
-      - name: Detect compileSdk
-        shell: bash
-        run: |
-          set -euo pipefail
+          # --------------------------------------------------------
+          # compileSdk
+          # --------------------------------------------------------
 
-          cd "$PROJECT_DIR"
-
-          COMPILE_SDK=""
-
-          # ------------------------------------------------------
-          # Groovy:
-          # compileSdk 35
-          # compileSdkVersion 35
-          # ------------------------------------------------------
-
-          COMPILE_SDK="$(
+          DETECTED_COMPILE_SDK="$(
             grep -RhoE \
-              'compileSdk(Version)?[[:space:]]+[0-9]+' \
+              'compileSdk(Version)?[[:space:]]*([=:][[:space:]]*)?[0-9]{2,3}' \
               . \
               --include='*.gradle' \
+              --include='*.gradle.kts' \
               2>/dev/null \
-              | grep -oE '[0-9]+' \
+              | grep -Eo '[0-9]{2,3}$' \
+              | sort -nr \
+              | head -n 1 \
+              || true
+          )"
+
+          if [ -n "$DETECTED_COMPILE_SDK" ]; then
+            COMPILE_SDK="$DETECTED_COMPILE_SDK"
+          fi
+
+          # --------------------------------------------------------
+          # buildToolsVersion
+          # --------------------------------------------------------
+
+          BUILD_TOOLS="$(
+            grep -RhoE \
+              'buildToolsVersion[[:space:]]*[=:]?[[:space:]]*["'\''][0-9]+\.[0-9]+\.[0-9]+["'\'']' \
+              . \
+              --include='*.gradle' \
+              --include='*.gradle.kts' \
+              2>/dev/null \
+              | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' \
+              | sort -V \
               | tail -n 1 \
               || true
           )"
 
-          # ------------------------------------------------------
-          # Kotlin:
-          # compileSdk = 35
-          # ------------------------------------------------------
+          # --------------------------------------------------------
+          # NDK
+          # --------------------------------------------------------
 
-          if [ -z "$COMPILE_SDK" ]; then
+          NDK_VERSION="$(
+            grep -RhoE \
+              'ndkVersion[[:space:]]*[=:]?[[:space:]]*["'\''][0-9]+\.[0-9]+\.[0-9]+["'\'']' \
+              . \
+              --include='*.gradle' \
+              --include='*.gradle.kts' \
+              2>/dev/null \
+              | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' \
+              | sort -V \
+              | tail -n 1 \
+              || true
+          )"
 
-            COMPILE_SDK="$(
-              grep -RhoE \
-                'compileSdk[[:space:]]*=[[:space:]]*[0-9]+' \
-                . \
-                --include='*.gradle.kts' \
-                2>/dev/null \
-                | grep -oE '[0-9]+' \
-                | tail -n 1 \
-                || true
-            )"
+          # --------------------------------------------------------
+          # CMake
+          # --------------------------------------------------------
 
-          fi
-
-          # ------------------------------------------------------
-          # Fallback
-          # ------------------------------------------------------
-
-          if [ -z "$COMPILE_SDK" ]; then
-            COMPILE_SDK="35"
-          fi
-
-          echo ""
-          echo "Detected compileSdk:"
-          echo "$COMPILE_SDK"
+          CMAKE_VERSION="$(
+            grep -RhoE \
+              'cmake[[:space:]]*[=:][[:space:]]*["'\''][0-9]+\.[0-9]+\.[0-9]+["'\'']' \
+              . \
+              --include='*.gradle' \
+              --include='*.gradle.kts' \
+              2>/dev/null \
+              | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' \
+              | sort -V \
+              | tail -n 1 \
+              || true
+          )"
 
           echo "COMPILE_SDK=$COMPILE_SDK" >> "$GITHUB_ENV"
 
-      # ==========================================================
-      # 16. INSTALL REQUIRED ANDROID PLATFORM
-      # ==========================================================
+          echo "BUILD_TOOLS=$BUILD_TOOLS" >> "$GITHUB_ENV"
 
-      - name: Install Android SDK platform
+          echo "NDK_VERSION=$NDK_VERSION" >> "$GITHUB_ENV"
+
+          echo "CMAKE_VERSION=$CMAKE_VERSION" >> "$GITHUB_ENV"
+
+          echo ""
+          echo "Detected:"
+          echo "compileSdk       = $COMPILE_SDK"
+          echo "buildTools       = ${BUILD_TOOLS:-not specified}"
+          echo "NDK              = ${NDK_VERSION:-not specified}"
+          echo "CMake            = ${CMAKE_VERSION:-not specified}"
+
+
+      # ============================================================
+      # 15. INSTALL SDK PACKAGES
+      # ============================================================
+
+      - name: "15 - Install required Android SDK packages"
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "=================================================="
-          echo "ANDROID SDK"
-          echo "=================================================="
+          echo "============================================================"
+          echo "ANDROID SDK INSTALL"
+          echo "============================================================"
 
-          echo ""
-          echo "compileSdk:"
-          echo "$COMPILE_SDK"
+          yes | sdkmanager --licenses \
+            >/dev/null 2>&1 \
+            || true
 
-          echo ""
-          echo "sdkmanager:"
-          sdkmanager --version
+          PACKAGES=()
 
-          echo ""
-          echo "Installing required platform..."
+          PACKAGES+=(
+            "platform-tools"
+          )
 
-          sdkmanager \
-            "platform-tools" \
+          PACKAGES+=(
             "platforms;android-${COMPILE_SDK}"
+          )
+
+          if [ -n "${BUILD_TOOLS:-}" ]; then
+            PACKAGES+=(
+              "build-tools;${BUILD_TOOLS}"
+            )
+          fi
+
+          if [ -n "${NDK_VERSION:-}" ]; then
+            PACKAGES+=(
+              "ndk;${NDK_VERSION}"
+            )
+          fi
+
+          if [ -n "${CMAKE_VERSION:-}" ]; then
+            PACKAGES+=(
+              "cmake;${CMAKE_VERSION}"
+            )
+          fi
+
+          echo ""
+          echo "Packages to install:"
+          printf ' - %s\n' "${PACKAGES[@]}"
+
+          echo ""
+          echo "Installing..."
+
+          yes | sdkmanager "${PACKAGES[@]}"
 
           echo ""
           echo "Installed Android packages:"
-          sdkmanager --list_installed | sed -n '1,250p'
+          sdkmanager --list_installed \
+            | head -n 300 \
+            || true
 
-      # ==========================================================
-      # 17. INSPECT BUILD CONFIGURATION
-      # ==========================================================
 
-      - name: Inspect build configuration
+      # ============================================================
+      # 16. LOCAL.PROPERTIES
+      # ============================================================
+
+      - name: "16 - Configure Android SDK path"
         shell: bash
         run: |
           set -euo pipefail
 
           cd "$PROJECT_DIR"
 
-          echo "=================================================="
-          echo "BUILD CONFIGURATION"
-          echo "=================================================="
+          if [ ! -f "local.properties" ]; then
 
-          if [ -f "./gradle.properties" ]; then
-            echo ""
-            echo "gradle.properties:"
-            cat ./gradle.properties
+            echo "sdk.dir=$ANDROID_SDK_ROOT" \
+              > local.properties
+
+          elif grep -q '^sdk\.dir=' local.properties; then
+
+            sed -i \
+              "s#^sdk\.dir=.*#sdk.dir=$ANDROID_SDK_ROOT#" \
+              local.properties
+
+          else
+
+            printf '\nsdk.dir=%s\n' \
+              "$ANDROID_SDK_ROOT" \
+              >> local.properties
           fi
 
-          if [ -f "./settings.gradle" ]; then
-            echo ""
-            echo "settings.gradle:"
-            cat ./settings.gradle
-          fi
+          echo ""
+          echo "local.properties:"
+          cat local.properties
 
-          if [ -f "./settings.gradle.kts" ]; then
-            echo ""
-            echo "settings.gradle.kts:"
-            cat ./settings.gradle.kts
-          fi
 
-          if [ -f "./build.gradle" ]; then
-            echo ""
-            echo "build.gradle:"
-            cat ./build.gradle
-          fi
+      # ============================================================
+      # 17. SAFE GRADLE PROPERTIES
+      # ============================================================
 
-          if [ -f "./build.gradle.kts" ]; then
-            echo ""
-            echo "build.gradle.kts:"
-            cat ./build.gradle.kts
-          fi
-
-      # ==========================================================
-      # 18. VERIFY GRADLE TASKS
-      # ==========================================================
-
-      - name: Verify Gradle tasks
+      - name: "17 - Repair Gradle properties"
         shell: bash
         run: |
           set -euo pipefail
 
           cd "$PROJECT_DIR"
 
-          ./gradlew tasks \
-            --no-daemon \
-            --stacktrace \
-            --console=plain
+          touch gradle.properties
 
-      # ==========================================================
-      # 19. CLEAN
-      # ==========================================================
+          if ! grep -q '^org\.gradle\.jvmargs=' gradle.properties; then
 
-      - name: Clean project
+            printf '\norg.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8\n' \
+              >> gradle.properties
+          fi
+
+          # إذا كان المشروع يستخدم مكتبات Android Support القديمة
+          # نفعّل AndroidX وJetifier فقط عند الحاجة.
+
+          if grep -Rqs \
+            'com\.android\.support:' \
+            . \
+            --include='*.gradle' \
+            --include='*.gradle.kts'
+          then
+
+            if ! grep -q '^android\.useAndroidX=' gradle.properties; then
+              echo 'android.useAndroidX=true' \
+                >> gradle.properties
+            fi
+
+            if ! grep -q '^android\.enableJetifier=' gradle.properties; then
+              echo 'android.enableJetifier=true' \
+                >> gradle.properties
+            fi
+          fi
+
+          echo ""
+          echo "Relevant properties:"
+          grep -E \
+            '^(org\.gradle\.jvmargs|android\.useAndroidX|android\.enableJetifier)=' \
+            gradle.properties \
+            || true
+
+
+      # ============================================================
+      # 18. DETECT KSP 2.3.5
+      #
+      # لا نغيّر KSP الآن.
+      #
+      # نسجل فقط هل المشروع يحتوي KSP 2.3.5.
+      #
+      # إذا فشل البناء بالخطأ المعروف:
+      # ApplicationManager.getApplication() is null
+      #
+      # سيتم إصلاح KSP في محاولة البناء الثانية فقط.
+      # ============================================================
+
+      - name: "18 - Detect KSP 2.3.5"
         shell: bash
         run: |
           set -euo pipefail
 
           cd "$PROJECT_DIR"
 
-          ./gradlew clean \
-            --no-daemon \
-            --stacktrace \
-            --console=plain
+          KSP_235_PRESENT="false"
 
-      # ==========================================================
-      # 20. BUILD DEBUG APK
-      # ==========================================================
+          while IFS= read -r -d '' FILE; do
 
-      - name: Build Debug APK
+            if grep -q 'ksp' "$FILE" 2>/dev/null \
+              && grep -q '2\.3\.5' "$FILE" 2>/dev/null
+            then
+
+              echo "KSP 2.3.5 detected in:"
+              echo "$FILE"
+
+              KSP_235_PRESENT="true"
+            fi
+
+          done < <(
+            find . \
+              -type f \
+              \( \
+                -name '*.gradle' \
+                -o \
+                -name '*.gradle.kts' \
+                -o \
+                -name '*.toml' \
+                -o \
+                -name 'gradle.properties' \
+              \) \
+              -print0
+          )
+
+          echo ""
+          echo "KSP_235_PRESENT=$KSP_235_PRESENT"
+
+          echo "KSP_235_PRESENT=$KSP_235_PRESENT" \
+            >> "$GITHUB_ENV"
+
+
+      # ============================================================
+      # 19. VERIFY GRADLE
+      # ============================================================
+
+      - name: "19 - Verify Gradle"
         shell: bash
         run: |
-          set -o pipefail
+          set -euo pipefail
 
           cd "$PROJECT_DIR"
 
-          echo "=================================================="
-          echo "BUILDING DEBUG APK"
-          echo "=================================================="
+          echo "Gradle command:"
+          echo "$GRADLE_CMD"
 
-          ./gradlew assembleDebug \
+          echo ""
+          echo "Gradle version:"
+          "$GRADLE_CMD" --version
+
+
+      # ============================================================
+      # 20. VERIFY GRADLE CONFIGURATION
+      # ============================================================
+
+      - name: "20 - Validate Gradle configuration"
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          echo "Running Gradle help..."
+
+          "$GRADLE_CMD" \
+            help \
             --no-daemon \
             --stacktrace \
-            --info \
             --console=plain \
-            2>&1 | tee "$GITHUB_WORKSPACE/gradle-build.log"
+            2>&1 \
+            | tee "$GITHUB_WORKSPACE/gradle-help.log"
 
-      # ==========================================================
-      # 21. FIND APK
-      # ==========================================================
 
-      - name: Find generated APK
+      # ============================================================
+      # 21. VERIFY TASKS
+      # ============================================================
+
+      - name: "21 - Verify Gradle tasks"
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          echo "Listing all Gradle tasks..."
+
+          "$GRADLE_CMD" \
+            tasks \
+            --all \
+            --no-daemon \
+            --stacktrace \
+            --console=plain \
+            2>&1 \
+            | tee "$GITHUB_WORKSPACE/gradle-tasks.log"
+
+
+      # ============================================================
+      # 22. CLEAN
+      # ============================================================
+
+      - name: "22 - Clean project"
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          "$GRADLE_CMD" \
+            clean \
+            --no-daemon \
+            --stacktrace \
+            --console=plain \
+            2>&1 \
+            | tee "$GITHUB_WORKSPACE/gradle-clean.log"
+
+
+      # ============================================================
+      # 23. BUILD APK
+      #
+      # ثلاث محاولات:
+      #
+      # 1. Build طبيعي.
+      #
+      # 2. إزالة cache وإعادة تشغيل tasks.
+      #
+      #    وإذا ظهر خطأ KSP المعروف:
+      #    وترجمت نسخة KSP إلى 2.3.6 إذا كانت 2.3.5.
+      #
+      # 3. Refresh dependencies كامل.
+      # ============================================================
+
+      - name: "23 - Build Debug APK"
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          cd "$PROJECT_DIR"
+
+          rm -f \
+            "$GITHUB_WORKSPACE/gradle-build.log" \
+            "$GITHUB_WORKSPACE/gradle-build-attempt-1.log" \
+            "$GITHUB_WORKSPACE/gradle-build-attempt-2.log" \
+            "$GITHUB_WORKSPACE/gradle-build-attempt-3.log"
+
+          echo "============================================================"
+          echo "BUILD DEBUG APK"
+          echo "============================================================"
+
+          echo ""
+          echo "Project:"
+          echo "$PROJECT_DIR"
+
+          echo ""
+          echo "Module:"
+          echo "$APP_MODULE"
+
+          echo ""
+          echo "Gradle:"
+          echo "$GRADLE_CMD"
+
+          echo ""
+          echo "Gradle version:"
+          echo "$GRADLE_VERSION"
+
+          echo ""
+          echo "Java:"
+          java -version
+
+          run_build() {
+
+            local ATTEMPT="$1"
+            local LOG_FILE="$2"
+
+            shift 2
+
+            echo ""
+            echo "------------------------------------------------------------"
+            echo "BUILD ATTEMPT $ATTEMPT"
+            echo "------------------------------------------------------------"
+
+            set +e
+
+            "$GRADLE_CMD" \
+              ":${APP_MODULE}:assembleDebug" \
+              --no-daemon \
+              --stacktrace \
+              --console=plain \
+              --warning-mode=all \
+              "$@" \
+              2>&1 \
+              | tee "$LOG_FILE"
+
+            local RC=${PIPESTATUS[0]}
+
+            set -e
+
+            return "$RC"
+          }
+
+
+          # ======================================================
+          # ATTEMPT 1
+          # ======================================================
+
+          if run_build \
+            "1" \
+            "$GITHUB_WORKSPACE/gradle-build-attempt-1.log"
+          then
+
+            cp \
+              "$GITHUB_WORKSPACE/gradle-build-attempt-1.log" \
+              "$GITHUB_WORKSPACE/gradle-build.log"
+
+            echo ""
+            echo "BUILD SUCCESSFUL ON ATTEMPT 1."
+
+            exit 0
+          fi
+
+
+          echo ""
+          echo "ATTEMPT 1 FAILED."
+
+
+          # ======================================================
+          # DIAGNOSTIC CHECK
+          # ======================================================
+
+          echo ""
+          echo "Checking for known KSP failure..."
+
+          KSP_FAILURE="false"
+
+          if grep -qE \
+            'ApplicationManager\.getApplication\(\).*null|return value of.*ApplicationManager\.getApplication\(\).*null' \
+            "$GITHUB_WORKSPACE/gradle-build-attempt-1.log"
+          then
+
+            KSP_FAILURE="true"
+
+            echo ""
+            echo "KNOWN KSP APPLICATIONMANAGER FAILURE DETECTED."
+
+          fi
+
+
+          # ======================================================
+          # KSP PATCH
+          #
+          # فقط إذا:
+          #
+          # 1. الخطأ المعروف ظهر فعليًا.
+          # 2. توجد KSP 2.3.5.
+          # ======================================================
+
+          if [ "$KSP_FAILURE" = "true" ] \
+            && [ "${KSP_235_PRESENT:-false}" = "true" ]
+          then
+
+            echo ""
+            echo "============================================================"
+            echo "APPLYING TARGETED KSP FIX"
+            echo "============================================================"
+
+            while IFS= read -r -d '' FILE; do
+
+              if grep -q 'ksp' "$FILE" 2>/dev/null \
+                && grep -q '2\.3\.5' "$FILE" 2>/dev/null
+              then
+
+                echo ""
+                echo "Patching:"
+                echo "$FILE"
+
+                sed -i \
+                  '/ksp/ s/2\.3\.5/2.3.6/g' \
+                  "$FILE"
+              fi
+
+            done < <(
+              find . \
+                -type f \
+                \( \
+                  -name '*.gradle' \
+                  -o \
+                  -name '*.gradle.kts' \
+                  -o \
+                  -name '*.toml' \
+                  -o \
+                  -name 'gradle.properties' \
+                \) \
+                -print0
+            )
+
+            echo ""
+            echo "KSP-related lines after patch:"
+
+            grep -RIn \
+              'ksp' \
+              . \
+              --include='*.gradle' \
+              --include='*.gradle.kts' \
+              --include='*.toml' \
+              2>/dev/null \
+              | head -n 100 \
+              || true
+
+          fi
+
+
+          # ======================================================
+          # RESET BUILD STATE
+          # ======================================================
+
+          echo ""
+          echo "Cleaning temporary Gradle build state..."
+
+          "$GRADLE_CMD" \
+            --stop \
+            2>/dev/null \
+            || true
+
+          rm -rf \
+            "$PROJECT_DIR/.gradle"
+
+          rm -rf \
+            "$PROJECT_DIR/${APP_MODULE}/build" \
+            2>/dev/null \
+            || true
+
+
+          # ======================================================
+          # ATTEMPT 2
+          #
+          # no-build-cache
+          # rerun tasks
+          # ======================================================
+
+          if run_build \
+            "2" \
+            "$GITHUB_WORKSPACE/gradle-build-attempt-2.log" \
+            --rerun-tasks \
+            --no-build-cache
+          then
+
+            cat \
+              "$GITHUB_WORKSPACE/gradle-build-attempt-1.log" \
+              "$GITHUB_WORKSPACE/gradle-build-attempt-2.log" \
+              > "$GITHUB_WORKSPACE/gradle-build.log"
+
+            echo ""
+            echo "BUILD SUCCESSFUL ON ATTEMPT 2."
+
+            exit 0
+          fi
+
+
+          echo ""
+          echo "ATTEMPT 2 FAILED."
+
+
+          # ======================================================
+          # RESET DAEMON
+          # ======================================================
+
+          "$GRADLE_CMD" \
+            --stop \
+            2>/dev/null \
+            || true
+
+
+          # ======================================================
+          # ATTEMPT 3
+          #
+          # refresh-dependencies
+          # ======================================================
+
+          if run_build \
+            "3" \
+            "$GITHUB_WORKSPACE/gradle-build-attempt-3.log" \
+            --rerun-tasks \
+            --no-build-cache \
+            --refresh-dependencies
+          then
+
+            cat \
+              "$GITHUB_WORKSPACE/gradle-build-attempt-1.log" \
+              "$GITHUB_WORKSPACE/gradle-build-attempt-2.log" \
+              "$GITHUB_WORKSPACE/gradle-build-attempt-3.log" \
+              > "$GITHUB_WORKSPACE/gradle-build.log"
+
+            echo ""
+            echo "BUILD SUCCESSFUL ON ATTEMPT 3."
+
+            exit 0
+          fi
+
+
+          # ======================================================
+          # FINAL BUILD LOG
+          # ======================================================
+
+          cat \
+            "$GITHUB_WORKSPACE/gradle-build-attempt-1.log" \
+            "$GITHUB_WORKSPACE/gradle-build-attempt-2.log" \
+            "$GITHUB_WORKSPACE/gradle-build-attempt-3.log" \
+            > "$GITHUB_WORKSPACE/gradle-build.log"
+
+
+          echo ""
+          echo "============================================================"
+          echo "BUILD FAILED AFTER ALL ATTEMPTS"
+          echo "============================================================"
+
+
+          echo ""
+          echo "---------------- KSP ERRORS ----------------"
+
+          grep -n -E \
+            'ApplicationManager|Application\.getApplication|KSP|ksp|symbol-processing' \
+            "$GITHUB_WORKSPACE/gradle-build.log" \
+            | tail -n 120 \
+            || true
+
+
+          echo ""
+          echo "---------------- ANDROID SDK ERRORS ----------------"
+
+          grep -n -E \
+            'SDK|compileSdk|buildTools|AAPT|Manifest merger|resource .* not found|uses-sdk|ANDROID_HOME' \
+            "$GITHUB_WORKSPACE/gradle-build.log" \
+            | tail -n 120 \
+            || true
+
+
+          echo ""
+          echo "---------------- KOTLIN / JVM ERRORS ----------------"
+
+          grep -n -E \
+            'Kotlin|jvmTarget|JVM target|Unsupported class file|Inconsistent JVM|Java' \
+            "$GITHUB_WORKSPACE/gradle-build.log" \
+            | tail -n 120 \
+            || true
+
+
+          echo ""
+          echo "---------------- DEPENDENCY ERRORS ----------------"
+
+          grep -n -E \
+            'Could not resolve|Could not find|Could not download|Download|TLS|SSL|PKIX|timeout|timed out|Connection reset|Connection refused' \
+            "$GITHUB_WORKSPACE/gradle-build.log" \
+            | tail -n 120 \
+            || true
+
+
+          echo ""
+          echo "---------------- COMPILER ERRORS ----------------"
+
+          grep -n -E \
+            'error:|e: |FAILURE:|Execution failed for task|Compilation failed' \
+            "$GITHUB_WORKSPACE/gradle-build.log" \
+            | tail -n 200 \
+            || true
+
+
+          echo ""
+          echo "---------------- LAST 250 LOG LINES ----------------"
+
+          tail -n 250 \
+            "$GITHUB_WORKSPACE/gradle-build.log" \
+            || true
+
+          exit 1
+
+
+      # ============================================================
+      # 24. FIND APK
+      # ============================================================
+
+      - name: "24 - Find generated APK"
         if: success()
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "=================================================="
-          echo "SEARCHING FOR APK"
-          echo "=================================================="
+          OUTPUT_DIR="$GITHUB_WORKSPACE/apk-output"
 
-          rm -rf "$GITHUB_WORKSPACE/apk-output"
+          rm -rf "$OUTPUT_DIR"
 
-          mkdir -p "$GITHUB_WORKSPACE/apk-output"
+          mkdir -p "$OUTPUT_DIR"
 
-          APK_FILE="$(
+          echo "Searching generated APK files..."
+
+          mapfile -t APKS < <(
             find "$PROJECT_DIR" \
               -type f \
-              -name "*.apk" \
-              -path "*/build/outputs/*" \
-              | sort \
-              | head -n 1 \
-              || true
-          )"
+              -name '*.apk' \
+              -path '*/build/outputs/*' \
+              -print \
+              | sort
+          )
 
-          if [ -z "$APK_FILE" ]; then
+          if [ "${#APKS[@]}" -eq 0 ]; then
 
-            echo ""
-            echo "ERROR: APK was not generated."
+            echo "::error::Gradle completed but no APK was found."
 
             echo ""
             echo "All APK files:"
             find "$PROJECT_DIR" \
               -type f \
-              -name "*.apk" \
+              -name '*.apk' \
               -print \
               | sort \
               || true
@@ -736,22 +1367,84 @@ jobs:
           fi
 
           echo ""
-          echo "APK:"
-          echo "$APK_FILE"
+          echo "APK files found:"
+          printf ' - %s\n' "${APKS[@]}"
 
-          cp \
-            "$APK_FILE" \
-            "$GITHUB_WORKSPACE/apk-output/TikTok-Downloader-debug.apk"
+
+          # أول APK Debug متوفر
+          SELECTED_APK=""
+
+          for APK in "${APKS[@]}"; do
+
+            if [[ "$APK" =~ debug ]]; then
+              SELECTED_APK="$APK"
+              break
+            fi
+
+          done
+
+
+          # fallback
+          if [ -z "$SELECTED_APK" ]; then
+            SELECTED_APK="${APKS[0]}"
+          fi
+
 
           echo ""
-          echo "APK output:"
-          ls -lh "$GITHUB_WORKSPACE/apk-output"
+          echo "Selected APK:"
+          echo "$SELECTED_APK"
 
-      # ==========================================================
-      # 22. UPLOAD APK
-      # ==========================================================
 
-      - name: Upload APK
+          cp \
+            "$SELECTED_APK" \
+            "$OUTPUT_DIR/TikTok-Downloader-debug.apk"
+
+
+          echo ""
+          echo "Final APK:"
+          ls -lh \
+            "$OUTPUT_DIR/TikTok-Downloader-debug.apk"
+
+
+      # ============================================================
+      # 25. APK INFORMATION
+      # ============================================================
+
+      - name: "25 - Inspect generated APK"
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK="$GITHUB_WORKSPACE/apk-output/TikTok-Downloader-debug.apk"
+
+          echo "============================================================"
+          echo "APK INFORMATION"
+          echo "============================================================"
+
+          echo ""
+          echo "File:"
+          ls -lh "$APK"
+
+          echo ""
+          echo "Type:"
+          file "$APK" || true
+
+          echo ""
+          echo "SHA256:"
+          sha256sum "$APK"
+
+          echo ""
+          echo "APK summary:"
+          apkanalyzer apk summary "$APK" \
+            || true
+
+
+      # ============================================================
+      # 26. UPLOAD APK
+      # ============================================================
+
+      - name: "26 - Upload APK"
         if: success()
         uses: actions/upload-artifact@v6
         with:
@@ -759,53 +1452,273 @@ jobs:
           path: apk-output/TikTok-Downloader-debug.apk
           if-no-files-found: error
           retention-days: 30
+          compression-level: 0
 
-      # ==========================================================
-      # 23. UPLOAD GRADLE LOG
-      # ==========================================================
 
-      - name: Upload Gradle build log
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: Gradle-Build-Log
-          path: gradle-build.log
-          if-no-files-found: ignore
-          retention-days: 7
+      # ============================================================
+      # 27. COLLECT DIAGNOSTICS
+      # ============================================================
 
-      # ==========================================================
-      # 24. FINAL REPORT
-      # ==========================================================
-
-      - name: Final build report
+      - name: "27 - Collect diagnostic files"
         if: always()
         shell: bash
         run: |
-          echo "=================================================="
-          echo "FINAL REPORT"
-          echo "=================================================="
+          set -euo pipefail
+
+          DIAGNOSTICS="$GITHUB_WORKSPACE/diagnostics"
+
+          rm -rf "$DIAGNOSTICS"
+
+          mkdir -p "$DIAGNOSTICS"
+
+
+          # --------------------------------------------------------
+          # Build logs
+          # --------------------------------------------------------
+
+          for FILE in \
+            gradle-build.log \
+            gradle-build-attempt-1.log \
+            gradle-build-attempt-2.log \
+            gradle-build-attempt-3.log \
+            gradle-help.log \
+            gradle-tasks.log \
+            gradle-clean.log
+          do
+
+            if [ -f "$GITHUB_WORKSPACE/$FILE" ]; then
+
+              cp \
+                "$GITHUB_WORKSPACE/$FILE" \
+                "$DIAGNOSTICS/$FILE"
+
+            fi
+
+          done
+
+
+          # --------------------------------------------------------
+          # Environment summary
+          # --------------------------------------------------------
+
+          {
+            echo "============================================================"
+            echo "BUILD ENVIRONMENT"
+            echo "============================================================"
+
+            echo ""
+            echo "Repository:"
+            echo "$GITHUB_REPOSITORY"
+
+            echo ""
+            echo "Commit:"
+            echo "$GITHUB_SHA"
+
+            echo ""
+            echo "Run:"
+            echo "$GITHUB_RUN_ID"
+
+            echo ""
+            echo "Project:"
+            echo "${PROJECT_DIR:-unknown}"
+
+            echo ""
+            echo "Module:"
+            echo "${APP_MODULE:-unknown}"
+
+            echo ""
+            echo "Java:"
+            echo "${JAVA_VERSION:-unknown}"
+
+            echo ""
+            echo "Gradle:"
+            echo "${GRADLE_VERSION:-unknown}"
+
+            echo ""
+            echo "Wrapper:"
+            echo "${HAS_WRAPPER:-unknown}"
+
+            echo ""
+            echo "Compile SDK:"
+            echo "${COMPILE_SDK:-unknown}"
+
+            echo ""
+            echo "Build Tools:"
+            echo "${BUILD_TOOLS:-not specified}"
+
+            echo ""
+            echo "NDK:"
+            echo "${NDK_VERSION:-not specified}"
+
+            echo ""
+            echo "CMake:"
+            echo "${CMAKE_VERSION:-not specified}"
+
+            echo ""
+            echo "KSP 2.3.5 detected:"
+            echo "${KSP_235_PRESENT:-unknown}"
+
+            echo ""
+            echo "============================================================"
+
+          } > "$DIAGNOSTICS/build-environment.txt"
+
+
+          # --------------------------------------------------------
+          # Wrapper
+          # --------------------------------------------------------
+
+          cd "$PROJECT_DIR"
+
+          if [ -f "gradle/wrapper/gradle-wrapper.properties" ]; then
+
+            cp \
+              "gradle/wrapper/gradle-wrapper.properties" \
+              "$DIAGNOSTICS/gradle-wrapper.properties"
+
+          fi
+
+
+          # --------------------------------------------------------
+          # Gradle configuration files
+          # --------------------------------------------------------
+
+          find . \
+            -type f \
+            \( \
+              -name 'build.gradle' \
+              -o \
+              -name 'build.gradle.kts' \
+              -o \
+              -name 'settings.gradle' \
+              -o \
+              -name 'settings.gradle.kts' \
+              -o \
+              -name 'gradle.properties' \
+              -o \
+              -name '*.toml' \
+            \) \
+            -print \
+            | sort \
+            > "$DIAGNOSTICS/gradle-files.txt"
+
+
+          # --------------------------------------------------------
+          # Gradle wrapper version
+          # --------------------------------------------------------
+
+          if [ -f "gradle/wrapper/gradle-wrapper.properties" ]; then
+
+            cat \
+              "gradle/wrapper/gradle-wrapper.properties" \
+              > "$DIAGNOSTICS/wrapper-properties.txt"
+
+          fi
+
+
+          # --------------------------------------------------------
+          # SDK info
+          # --------------------------------------------------------
+
+          sdkmanager --list_installed \
+            > "$DIAGNOSTICS/android-sdk-packages.txt" \
+            2>&1 \
+            || true
+
+
+          # --------------------------------------------------------
+          # Project tree
+          # --------------------------------------------------------
+
+          find . \
+            -maxdepth 8 \
+            -print \
+            | sort \
+            > "$DIAGNOSTICS/project-tree.txt"
+
+
+      # ============================================================
+      # 28. UPLOAD DIAGNOSTICS
+      # ============================================================
+
+      - name: "28 - Upload diagnostics"
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: TikTok-Downloader-Diagnostics
+          path: diagnostics/
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 6
+
+
+      # ============================================================
+      # 29. FINAL REPORT
+      # ============================================================
+
+      - name: "29 - Final build report"
+        if: always()
+        shell: bash
+        run: |
+          echo ""
+          echo "============================================================"
+          echo "FINAL BUILD REPORT"
+          echo "============================================================"
+
+          echo ""
+          echo "Repository:"
+          echo "$GITHUB_REPOSITORY"
+
+          echo ""
+          echo "Commit:"
+          echo "$GITHUB_SHA"
+
+          echo ""
+          echo "Run:"
+          echo "$GITHUB_RUN_ID"
 
           echo ""
           echo "Project:"
           echo "${PROJECT_DIR:-unknown}"
 
           echo ""
-          echo "App module:"
+          echo "Module:"
           echo "${APP_MODULE:-unknown}"
 
           echo ""
-          echo "compileSdk:"
-          echo "${COMPILE_SDK:-unknown}"
+          echo "Java:"
+          echo "${JAVA_VERSION:-unknown}"
 
           echo ""
-          echo "Gradle wrapper:"
+          echo "Gradle:"
+          echo "${GRADLE_VERSION:-unknown}"
+
+          echo ""
+          echo "Wrapper:"
           echo "${HAS_WRAPPER:-unknown}"
 
           echo ""
-          echo "APK directory:"
+          echo "Compile SDK:"
+          echo "${COMPILE_SDK:-unknown}"
 
-          if [ -d "$GITHUB_WORKSPACE/apk-output" ]; then
-            ls -lah "$GITHUB_WORKSPACE/apk-output"
+          echo ""
+          echo "KSP 2.3.5:"
+          echo "${KSP_235_PRESENT:-unknown}"
+
+          echo ""
+
+          if [ -f "$GITHUB_WORKSPACE/apk-output/TikTok-Downloader-debug.apk" ]; then
+
+            echo "RESULT:"
+            echo "APK GENERATED SUCCESSFULLY"
+
+            echo ""
+            ls -lh \
+              "$GITHUB_WORKSPACE/apk-output/TikTok-Downloader-debug.apk"
+
           else
-            echo "No APK directory."
+
+            echo "RESULT:"
+            echo "BUILD FAILED OR APK WAS NOT GENERATED"
+
           fi
