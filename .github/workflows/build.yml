@@ -17,7 +17,7 @@ jobs:
     steps:
 
       # =========================================================
-      # 1. Checkout
+      # 1. CHECKOUT
       # =========================================================
 
       - name: Checkout
@@ -25,7 +25,7 @@ jobs:
 
 
       # =========================================================
-      # 2. Java 17
+      # 2. JAVA
       # =========================================================
 
       - name: Setup Java 17
@@ -36,7 +36,7 @@ jobs:
 
 
       # =========================================================
-      # 3. Android SDK
+      # 3. ANDROID SDK
       # =========================================================
 
       - name: Setup Android SDK
@@ -44,7 +44,44 @@ jobs:
 
 
       # =========================================================
-      # 4. Find ZIP
+      # 4. VERIFY PREINSTALLED ANDROID SDK
+      # =========================================================
+
+      - name: Verify Android SDK
+        shell: bash
+        run: |
+          set -e
+
+          echo "=============================================="
+          echo "ANDROID SDK"
+          echo "=============================================="
+
+          echo "ANDROID_HOME:"
+          echo "${ANDROID_HOME:-not set}"
+
+          echo ""
+          echo "ANDROID_SDK_ROOT:"
+          echo "${ANDROID_SDK_ROOT:-not set}"
+
+          echo ""
+          echo "SDK Manager:"
+          sdkmanager --version
+
+          echo ""
+          echo "Installed Android platforms:"
+          sdkmanager --list_installed 2>/dev/null \
+            | grep "platforms;android-" \
+            || true
+
+          echo ""
+          echo "Installed Build Tools:"
+          sdkmanager --list_installed 2>/dev/null \
+            | grep "build-tools;" \
+            || true
+
+
+      # =========================================================
+      # 5. FIND ZIP
       # =========================================================
 
       - name: Find TikTok project ZIP
@@ -67,18 +104,18 @@ jobs:
           fi
 
           if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: tiktok-downloader.zip was not found."
+            echo "ERROR: tiktok-downloader.zip not found."
             exit 1
           fi
 
           echo "ZIP_FILE=$ZIP_FILE" >> "$GITHUB_ENV"
 
-          echo "Using:"
+          echo "Using ZIP:"
           echo "$ZIP_FILE"
 
 
       # =========================================================
-      # 5. Verify ZIP
+      # 6. VERIFY ZIP
       # =========================================================
 
       - name: Verify ZIP
@@ -92,10 +129,10 @@ jobs:
 
 
       # =========================================================
-      # 6. Extract ZIP
+      # 7. EXTRACT PROJECT
       # =========================================================
 
-      - name: Extract project
+      - name: Extract Android project
         shell: bash
         run: |
           set -e
@@ -112,7 +149,7 @@ jobs:
 
 
       # =========================================================
-      # 7. Find Android project
+      # 8. LOCATE GRADLE PROJECT
       # =========================================================
 
       - name: Locate Android project
@@ -123,7 +160,7 @@ jobs:
           ROOT="$GITHUB_WORKSPACE/android-project"
           PROJECT_DIR=""
 
-          # Prefer project containing app/
+          # Prefer settings.gradle project containing app/
           while IFS= read -r SETTINGS; do
 
             CANDIDATE="$(dirname "$SETTINGS")"
@@ -191,7 +228,7 @@ jobs:
             echo "ERROR: Android Gradle project not found."
 
             echo ""
-            echo "Extracted tree:"
+            echo "Extracted project:"
 
             find "$ROOT" -maxdepth 12 -print | sort
 
@@ -210,10 +247,10 @@ jobs:
 
 
       # =========================================================
-      # 8. Find application module
+      # 9. LOCATE APP MODULE
       # =========================================================
 
-      - name: Locate application module
+      - name: Locate Android app module
         shell: bash
         run: |
           set -e
@@ -222,13 +259,11 @@ jobs:
 
           APP_MODULE=""
 
-          # Standard app module
           if [ -d "app" ]; then
             APP_MODULE="$PROJECT_DIR/app"
           fi
 
 
-          # Manifest fallback
           if [ -z "$APP_MODULE" ]; then
 
             MANIFEST="$(
@@ -253,9 +288,9 @@ jobs:
 
           if [ -z "$APP_MODULE" ]; then
 
-            echo "ERROR: Android application module not found."
+            echo "ERROR: Android app module not found."
 
-            find . -maxdepth 8 -print | sort
+            find . -maxdepth 10 -print | sort
 
             exit 1
 
@@ -270,13 +305,15 @@ jobs:
             RELATIVE_MODULE="app"
           fi
 
+
           MODULE_TASK=":${RELATIVE_MODULE//\//:}:assembleDebug"
+
 
           echo "APP_MODULE=$APP_MODULE" >> "$GITHUB_ENV"
           echo "MODULE_TASK=$MODULE_TASK" >> "$GITHUB_ENV"
 
           echo ""
-          echo "Application module:"
+          echo "Android module:"
           echo "$APP_MODULE"
 
           echo ""
@@ -285,10 +322,166 @@ jobs:
 
 
       # =========================================================
-      # 9. Determine Gradle version
+      # 10. DETECT COMPILE SDK
       # =========================================================
 
-      - name: Determine Gradle
+      - name: Detect Android SDK requirements
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          COMPILE_SDK=""
+
+          # compileSdk = 35
+          COMPILE_SDK="$(
+            grep -RhoE \
+              'compileSdk[[:space:]]*[=:]?[[:space:]]*[0-9]+' \
+              . \
+              --include="*.gradle" \
+              --include="*.gradle.kts" \
+              2>/dev/null \
+              | grep -oE '[0-9]+' \
+              | head -n 1 \
+              || true
+          )"
+
+
+          # compileSdkVersion 35
+          if [ -z "$COMPILE_SDK" ]; then
+
+            COMPILE_SDK="$(
+              grep -RhoE \
+                'compileSdkVersion[[:space:]]+[0-9]+' \
+                . \
+                --include="*.gradle" \
+                --include="*.gradle.kts" \
+                2>/dev/null \
+                | grep -oE '[0-9]+' \
+                | head -n 1 \
+                || true
+            )"
+
+          fi
+
+
+          # Kotlin DSL:
+          # compileSdk = libs.versions...
+          if [ -z "$COMPILE_SDK" ]; then
+            COMPILE_SDK="35"
+          fi
+
+
+          echo "Detected compileSdk: $COMPILE_SDK"
+
+
+          BUILD_TOOLS_VERSION=""
+
+          BUILD_TOOLS_VERSION="$(
+            grep -RhoE \
+              'buildToolsVersion[[:space:]]*[=:]?[[:space:]]*["'\''][0-9]+\.[0-9]+\.[0-9]+["'\'']' \
+              . \
+              --include="*.gradle" \
+              --include="*.gradle.kts" \
+              2>/dev/null \
+              | grep -oE \
+                '[0-9]+\.[0-9]+\.[0-9]+' \
+              | head -n 1 \
+              || true
+          )"
+
+
+          if [ -z "$BUILD_TOOLS_VERSION" ]; then
+            BUILD_TOOLS_VERSION=""
+          fi
+
+
+          echo "Detected buildToolsVersion:"
+          echo "${BUILD_TOOLS_VERSION:-default}"
+
+
+          echo "COMPILE_SDK=$COMPILE_SDK" >> "$GITHUB_ENV"
+          echo "BUILD_TOOLS_VERSION=$BUILD_TOOLS_VERSION" >> "$GITHUB_ENV"
+
+
+      # =========================================================
+      # 11. INSTALL ONLY MISSING SDK COMPONENTS
+      # =========================================================
+
+      - name: Prepare required Android SDK
+        shell: bash
+        run: |
+          set -e
+
+          echo "=============================================="
+          echo "PREPARING ANDROID SDK"
+          echo "=============================================="
+
+
+          # Accept licenses without making the job fail
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+
+
+          # -----------------------------------------------------
+          # Platform
+          # -----------------------------------------------------
+
+          PLATFORM_PACKAGE="platforms;android-${COMPILE_SDK}"
+
+          if sdkmanager --list_installed 2>/dev/null \
+            | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/, "", $1); print $1}' \
+            | grep -Fxq "$PLATFORM_PACKAGE"; then
+
+            echo "Platform already installed:"
+            echo "$PLATFORM_PACKAGE"
+
+          else
+
+            echo "Installing missing platform:"
+            echo "$PLATFORM_PACKAGE"
+
+            sdkmanager "$PLATFORM_PACKAGE"
+
+          fi
+
+
+          # -----------------------------------------------------
+          # Exact Build Tools
+          # -----------------------------------------------------
+
+          if [ -n "$BUILD_TOOLS_VERSION" ]; then
+
+            BUILD_TOOLS_PACKAGE="build-tools;${BUILD_TOOLS_VERSION}"
+
+            if sdkmanager --list_installed 2>/dev/null \
+              | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/, "", $1); print $1}' \
+              | grep -Fxq "$BUILD_TOOLS_PACKAGE"; then
+
+              echo "Build Tools already installed:"
+              echo "$BUILD_TOOLS_PACKAGE"
+
+            else
+
+              echo "Installing missing Build Tools:"
+              echo "$BUILD_TOOLS_PACKAGE"
+
+              sdkmanager "$BUILD_TOOLS_PACKAGE"
+
+            fi
+
+          fi
+
+
+          echo ""
+          echo "Android SDK preparation complete."
+
+
+      # =========================================================
+      # 12. DETECT GRADLE
+      # =========================================================
+
+      - name: Configure Gradle
         shell: bash
         run: |
           set -e
@@ -297,12 +490,8 @@ jobs:
 
           USE_WRAPPER="false"
           GRADLE_VERSION=""
-          AGP_VERSION=""
 
-          # -----------------------------------------------------
           # Existing wrapper
-          # -----------------------------------------------------
-
           if [ -f "./gradlew" ] && \
              [ -f "gradle/wrapper/gradle-wrapper.properties" ]; then
 
@@ -310,15 +499,12 @@ jobs:
 
             USE_WRAPPER="true"
 
-            echo "Existing Gradle Wrapper found."
+            echo "Gradle Wrapper found."
 
           fi
 
 
-          # -----------------------------------------------------
-          # Read wrapper version if wrapper script exists
-          # -----------------------------------------------------
-
+          # Read wrapper version
           if [ "$USE_WRAPPER" = "true" ]; then
 
             DISTRIBUTION_URL="$(
@@ -330,219 +516,100 @@ jobs:
 
             GRADLE_VERSION="$(
               echo "$DISTRIBUTION_URL" \
-              | sed -n \
-                's/.*gradle-\([0-9][0-9.]*\)-.*/\1/p'
+                | sed \
+                  's/.*gradle-\([0-9][0-9.]*\)-.*/\1/p'
             )"
 
-            echo ""
             echo "Wrapper Gradle:"
             echo "${GRADLE_VERSION:-unknown}"
 
           fi
 
 
-          # -----------------------------------------------------
-          # Detect AGP
-          # -----------------------------------------------------
-
+          # Fallback when wrapper does not exist
           if [ "$USE_WRAPPER" = "false" ]; then
 
-            # libs.versions.toml
-            if [ -f "gradle/libs.versions.toml" ]; then
+            GRADLE_VERSION="8.13"
 
-              # Direct version:
-              # agp = "8.13.2"
-              AGP_VERSION="$(
-                grep -Ei \
-                  '^[[:space:]]*(agp|androidGradlePlugin)[[:space:]]*=' \
-                  gradle/libs.versions.toml \
-                  | grep -oE \
-                    '[0-9]+\.[0-9]+\.[0-9]+' \
-                  | head -n 1 \
-                  || true
-              )"
-
-            fi
-
-
-            # Plugin version in Gradle files
-            if [ -z "$AGP_VERSION" ]; then
-
-              AGP_VERSION="$(
-                grep -RhoE \
-                  'com\.android\.application[[:space:]]*[^0-9]{0,100}[0-9]+\.[0-9]+\.[0-9]+' \
-                  . \
-                  --include="*.gradle" \
-                  --include="*.gradle.kts" \
-                  | grep -oE \
-                    '[0-9]+\.[0-9]+\.[0-9]+' \
-                  | head -n 1 \
-                  || true
-              )"
-
-            fi
+            # Detect AGP
+            AGP_VERSION="$(
+              grep -RhoE \
+                'com\.android\.tools\.build:gradle:[0-9]+\.[0-9]+\.[0-9]+' \
+                . \
+                --include="*.gradle" \
+                --include="*.gradle.kts" \
+                2>/dev/null \
+                | grep -oE \
+                  '[0-9]+\.[0-9]+\.[0-9]+' \
+                | head -n 1 \
+                || true
+            )"
 
 
-            # buildscript classpath
-            if [ -z "$AGP_VERSION" ]; then
-
-              AGP_VERSION="$(
-                grep -RhoE \
-                  'com\.android\.tools\.build:gradle:[0-9]+\.[0-9]+\.[0-9]+' \
-                  . \
-                  --include="*.gradle" \
-                  --include="*.gradle.kts" \
-                  | grep -oE \
-                    '[0-9]+\.[0-9]+\.[0-9]+' \
-                  | head -n 1 \
-                  || true
-              )"
-
-            fi
-
-          fi
-
-
-          echo ""
-          echo "Detected AGP:"
-          echo "${AGP_VERSION:-unknown}"
-
-
-          # -----------------------------------------------------
-          # Exact AGP -> Gradle compatibility
-          # -----------------------------------------------------
-
-          if [ "$USE_WRAPPER" = "false" ]; then
-
-            if [ -z "$AGP_VERSION" ]; then
-
-              echo ""
-              echo "WARNING: AGP version could not be detected."
-              echo "Using Gradle 8.13 fallback."
-
-              GRADLE_VERSION="8.13"
-
-            else
+            if [ -n "$AGP_VERSION" ]; then
 
               AGP_MAJOR="$(echo "$AGP_VERSION" | cut -d. -f1)"
               AGP_MINOR="$(echo "$AGP_VERSION" | cut -d. -f2)"
 
 
-              # AGP 9.4.x -> Gradle 9.6
-              if [ "$AGP_MAJOR" -eq 9 ] && [ "$AGP_MINOR" -ge 4 ]; then
-
-                GRADLE_VERSION="9.6.0"
-
-              # AGP 9.3.x -> Gradle 9.5
-              elif [ "$AGP_MAJOR" -eq 9 ] && [ "$AGP_MINOR" -eq 3 ]; then
-
-                GRADLE_VERSION="9.5.0"
-
-              # AGP 9.2.x -> Gradle 9.4.1
-              elif [ "$AGP_MAJOR" -eq 9 ] && [ "$AGP_MINOR" -eq 2 ]; then
-
-                GRADLE_VERSION="9.4.1"
-
-              # AGP 9.1.x -> Gradle 9.3.1
-              elif [ "$AGP_MAJOR" -eq 9 ] && [ "$AGP_MINOR" -eq 1 ]; then
-
-                GRADLE_VERSION="9.3.1"
-
-              # AGP 9.0.x -> Gradle 9.1
-              elif [ "$AGP_MAJOR" -eq 9 ]; then
-
+              if [ "$AGP_MAJOR" -ge 9 ]; then
                 GRADLE_VERSION="9.1.0"
 
-              # AGP 8.13 / 8.12 / 8.11 -> Gradle 8.13
-              elif [ "$AGP_MAJOR" -eq 8 ] && [ "$AGP_MINOR" -ge 11 ]; then
-
+              elif [ "$AGP_MAJOR" -eq 8 ] && [ "$AGP_MINOR" -ge 13 ]; then
                 GRADLE_VERSION="8.13"
 
-              # AGP 8.10 / 8.9 -> Gradle 8.11.1
-              elif [ "$AGP_MAJOR" -eq 8 ] && [ "$AGP_MINOR" -ge 9 ]; then
+              elif [ "$AGP_MAJOR" -eq 8 ] && [ "$AGP_MINOR" -ge 11 ]; then
+                GRADLE_VERSION="8.13"
 
+              elif [ "$AGP_MAJOR" -eq 8 ] && [ "$AGP_MINOR" -ge 9 ]; then
                 GRADLE_VERSION="8.11.1"
 
-              # AGP 8.8 -> Gradle 8.10.2
               elif [ "$AGP_MAJOR" -eq 8 ] && [ "$AGP_MINOR" -eq 8 ]; then
-
                 GRADLE_VERSION="8.10.2"
 
-              # AGP 8.7 -> Gradle 8.9
               elif [ "$AGP_MAJOR" -eq 8 ] && [ "$AGP_MINOR" -eq 7 ]; then
-
                 GRADLE_VERSION="8.9"
 
-              # AGP 8.5 / 8.6 -> Gradle 8.7
               elif [ "$AGP_MAJOR" -eq 8 ] && [ "$AGP_MINOR" -ge 5 ]; then
-
                 GRADLE_VERSION="8.7"
 
-              # AGP 8.4 -> Gradle 8.6
               elif [ "$AGP_MAJOR" -eq 8 ] && [ "$AGP_MINOR" -eq 4 ]; then
-
                 GRADLE_VERSION="8.6"
 
-              # AGP 8.3 -> Gradle 8.4
               elif [ "$AGP_MAJOR" -eq 8 ] && [ "$AGP_MINOR" -eq 3 ]; then
-
                 GRADLE_VERSION="8.4"
 
-              # AGP 8.2 -> Gradle 8.2
               elif [ "$AGP_MAJOR" -eq 8 ] && [ "$AGP_MINOR" -eq 2 ]; then
-
                 GRADLE_VERSION="8.2"
 
-              # AGP 8.1 -> Gradle 8.0
-              elif [ "$AGP_MAJOR" -eq 8 ] && [ "$AGP_MINOR" -eq 1 ]; then
-
-                GRADLE_VERSION="8.0"
-
-              # AGP 8.0 -> Gradle 8.0
               elif [ "$AGP_MAJOR" -eq 8 ]; then
-
                 GRADLE_VERSION="8.0"
 
-              # AGP 7.x
               elif [ "$AGP_MAJOR" -eq 7 ]; then
-
                 GRADLE_VERSION="7.6.4"
-
-              else
-
-                GRADLE_VERSION="8.13"
 
               fi
 
             fi
 
+
+            echo "Detected AGP:"
+            echo "${AGP_VERSION:-unknown}"
+
           fi
 
 
-          echo ""
-          echo "=============================================="
-          echo "BUILD TOOLCHAIN"
-          echo "=============================================="
-
-          echo "Wrapper:"
-          echo "$USE_WRAPPER"
-
-          echo ""
-          echo "AGP:"
-          echo "${AGP_VERSION:-wrapper-defined}"
-
-          echo ""
-          echo "Gradle:"
-          echo "${GRADLE_VERSION:-wrapper-defined}"
-
-
           echo "USE_WRAPPER=$USE_WRAPPER" >> "$GITHUB_ENV"
-          echo "AGP_VERSION=$AGP_VERSION" >> "$GITHUB_ENV"
           echo "GRADLE_VERSION=$GRADLE_VERSION" >> "$GITHUB_ENV"
 
 
+          echo ""
+          echo "Gradle version:"
+          echo "$GRADLE_VERSION"
+
+
       # =========================================================
-      # 10. Setup Gradle when wrapper is absent
+      # 13. SETUP GRADLE ONLY WHEN NEEDED
       # =========================================================
 
       - name: Setup Gradle
@@ -551,67 +618,10 @@ jobs:
         with:
           gradle-version: ${{ env.GRADLE_VERSION }}
           cache-disabled: true
-          add-job-summary: on-failure
 
 
       # =========================================================
-      # 11. Install Android SDK required by project
-      # =========================================================
-
-      - name: Install Android SDK
-        shell: bash
-        run: |
-          set -e
-
-          yes | sdkmanager --licenses >/dev/null 2>&1 || true
-
-          COMPILE_SDK=""
-
-          # Groovy
-          COMPILE_SDK="$(
-            grep -RhoE \
-              'compileSdk(V|ersion)?[[:space:]]*[=]?[[:space:]]*[0-9]+' \
-              "$PROJECT_DIR" \
-              --include="*.gradle" \
-              --include="*.gradle.kts" \
-              | grep -oE '[0-9]+' \
-              | head -n 1 \
-              || true
-          )"
-
-
-          if [ -z "$COMPILE_SDK" ]; then
-            COMPILE_SDK="36"
-          fi
-
-
-          echo "Detected compileSdk: $COMPILE_SDK"
-
-
-          # Install broad supported SDK range.
-          sdkmanager \
-            "platform-tools" \
-            "platforms;android-34" \
-            "platforms;android-35" \
-            "platforms;android-36" \
-            "platforms;android-37" \
-            "build-tools;34.0.0" \
-            "build-tools;35.0.0" \
-            "build-tools;36.0.0"
-
-
-          # Try exact platform if different.
-          sdkmanager \
-            "platforms;android-${COMPILE_SDK}" \
-            >/dev/null 2>&1 || true
-
-
-          echo ""
-          echo "Android SDK installation complete."
-
-
-      # =========================================================
-      # 12. Build only the application module
+      # 14. BUILD
       # =========================================================
 
       - name: Build Debug APK
@@ -627,11 +637,15 @@ jobs:
 
           echo ""
           echo "Project:"
-          pwd
+          echo "$PROJECT_DIR"
 
           echo ""
           echo "Task:"
           echo "$MODULE_TASK"
+
+          echo ""
+          echo "compileSdk:"
+          echo "$COMPILE_SDK"
 
           echo ""
           echo "Java:"
@@ -666,7 +680,7 @@ jobs:
 
 
       # =========================================================
-      # 13. Find APK
+      # 15. FIND APK
       # =========================================================
 
       - name: Find APK
@@ -693,10 +707,7 @@ jobs:
 
           if [ -z "$APK_FILE" ]; then
 
-            echo "ERROR: Build succeeded but APK was not found."
-
-            echo ""
-            echo "Build outputs:"
+            echo "ERROR: APK was not generated."
 
             find "$APP_MODULE" \
               -path "*/build/outputs/*" \
@@ -727,7 +738,7 @@ jobs:
 
 
       # =========================================================
-      # 14. Upload APK
+      # 16. UPLOAD APK
       # =========================================================
 
       - name: Upload APK
@@ -743,7 +754,7 @@ jobs:
 
 
       # =========================================================
-      # 15. Always upload build log
+      # 17. ALWAYS UPLOAD BUILD LOG
       # =========================================================
 
       - name: Upload build log
