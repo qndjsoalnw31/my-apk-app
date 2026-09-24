@@ -12,9 +12,18 @@ permissions:
 env:
   JAVA_VERSION: "17"
   GRADLE_VERSION: "9.3.1"
+
+  # Android 16 QPR2
   ANDROID_PLATFORM: "36.1"
+
+  # Latest stable Build Tools 36.1
   ANDROID_BUILD_TOOLS: "36.1.0"
+
   GRADLE_OPTS: "-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8"
+
+  # Direct Google SDK archives used only as fallback.
+  ANDROID_PLATFORM_URL: "https://dl.google.com/android/repository/platform-36.1_r01.zip"
+  ANDROID_BUILD_TOOLS_URL: "https://dl.google.com/android/repository/build-tools_r36.1_linux.zip"
 
 jobs:
   build:
@@ -34,9 +43,11 @@ jobs:
 
       # ============================================================
       # 02 - JAVA 17
+      #
       # IMPORTANT:
-      # No Gradle cache is used here.
-      # The Android project is inside the ZIP and has not been
+      # DO NOT enable Gradle cache here.
+      #
+      # The actual Gradle project is inside the ZIP and has not been
       # extracted yet.
       # ============================================================
       - name: "02 - Setup Java 17"
@@ -46,10 +57,13 @@ jobs:
           java-version: "17"
 
       # ============================================================
-      # 03 - ANDROID SDK COMMAND LINE TOOLS
-      # Required SDK packages are installed explicitly later.
+      # 03 - ANDROID SDK TOOLS
+      #
+      # Only install command-line tools here.
+      # SDK platform/build-tools are installed later after the ZIP
+      # has been inspected.
       # ============================================================
-      - name: "03 - Setup Android SDK tools"
+      - name: "03 - Setup Android SDK command line tools"
         uses: android-actions/setup-android@v4
         with:
           packages: ""
@@ -59,7 +73,7 @@ jobs:
       # ============================================================
       # 04 - LOCATE ZIP
       # ============================================================
-      - name: "04 - Locate Android project ZIP"
+      - name: "04 - Locate TikTok Downloader ZIP"
         shell: bash
         run: |
           set -euo pipefail
@@ -82,26 +96,38 @@ jobs:
 
           if [ -z "$ZIP_FILE" ] || [ ! -f "$ZIP_FILE" ]; then
             echo "::error::No Android project ZIP was found."
-            echo "Repository contents:"
-            find "$GITHUB_WORKSPACE" -maxdepth 6 -type f -print | sort || true
+
+            echo ""
+            echo "Repository files:"
+            find "$GITHUB_WORKSPACE" \
+              -maxdepth 8 \
+              -type f \
+              -print \
+              | sort \
+              || true
+
             exit 1
           fi
 
           echo "ZIP_FILE=$ZIP_FILE" >> "$GITHUB_ENV"
 
+          echo ""
           echo "Selected ZIP:"
           ls -lh "$ZIP_FILE"
 
       # ============================================================
       # 05 - VALIDATE ZIP
       # ============================================================
-      - name: "05 - Validate ZIP archive"
+      - name: "05 - Validate ZIP"
         shell: bash
         run: |
           set -euo pipefail
 
+          echo "Testing ZIP integrity..."
+
           unzip -t "$ZIP_FILE"
 
+          echo ""
           echo "ZIP integrity: OK"
 
       # ============================================================
@@ -115,15 +141,21 @@ jobs:
           EXTRACT_ROOT="$GITHUB_WORKSPACE/android-project"
 
           rm -rf "$EXTRACT_ROOT"
+
           mkdir -p "$EXTRACT_ROOT"
 
           unzip -q "$ZIP_FILE" -d "$EXTRACT_ROOT"
 
-          echo "Extracted project files:"
-          find "$EXTRACT_ROOT" -maxdepth 12 -type f -print | sort
+          echo ""
+          echo "Extracted project tree:"
+
+          find "$EXTRACT_ROOT" \
+            -maxdepth 12 \
+            -print \
+            | sort
 
       # ============================================================
-      # 07 - FIND PROJECT ROOT
+      # 07 - FIND GRADLE ROOT
       # ============================================================
       - name: "07 - Locate Gradle project root"
         shell: bash
@@ -145,7 +177,7 @@ jobs:
           })"
 
           if [ -z "$SETTINGS_FILE" ]; then
-            echo "::error::settings.gradle(.kts) was not found inside the ZIP."
+            echo "::error::No settings.gradle.kts or settings.gradle was found."
             exit 1
           fi
 
@@ -153,231 +185,652 @@ jobs:
 
           if [ ! -f "$PROJECT_DIR/build.gradle.kts" ] && \
              [ ! -f "$PROJECT_DIR/build.gradle" ]; then
-            echo "::error::Gradle root build file was not found: $PROJECT_DIR"
+            echo "::error::Root Gradle build file is missing."
+            echo "PROJECT_DIR=$PROJECT_DIR"
+            exit 1
+          fi
+
+          if [ ! -f "$PROJECT_DIR/app/build.gradle.kts" ] && \
+             [ ! -f "$PROJECT_DIR/app/build.gradle" ]; then
+            echo "::error::Android app module build file is missing."
             exit 1
           fi
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
+          echo ""
           echo "Gradle project root:"
           echo "$PROJECT_DIR"
 
       # ============================================================
-      # 08 - INSTALL EXACT SDK REQUIRED BY THE ZIP
-      # Project:
-      # compileSdk release(36) { minorApiLevel = 1 }
+      # 08 - INSPECT ACTUAL PROJECT
       # ============================================================
-      - name: "08 - Install Android SDK 36.1"
-        shell: bash
-        run: |
-          set -uo pipefail
-
-          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
-
-          if [ -z "$SDK_ROOT" ] || [ ! -d "$SDK_ROOT" ]; then
-            echo "::error::Android SDK root is unavailable."
-            exit 1
-          fi
-
-          SDKMANAGER="$(command -v sdkmanager || true)"
-
-          if [ -z "$SDKMANAGER" ]; then
-            if [ -x "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
-              SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
-            else
-              SDKMANAGER="$({
-                find "$SDK_ROOT/cmdline-tools" \
-                  -type f \
-                  -name sdkmanager \
-                  -print \
-                  -quit \
-                  2>/dev/null || true
-              })"
-            fi
-          fi
-
-          if [ -z "$SDKMANAGER" ] || [ ! -x "$SDKMANAGER" ]; then
-            echo "::error::sdkmanager was not found."
-            find "$SDK_ROOT/cmdline-tools" \
-              -maxdepth 5 \
-              -type f \
-              -name sdkmanager \
-              -print \
-              2>/dev/null || true
-            exit 1
-          fi
-
-          export ANDROID_HOME="$SDK_ROOT"
-          export ANDROID_SDK_ROOT="$SDK_ROOT"
-
-          echo "SDK_ROOT=$SDK_ROOT"
-          echo "SDKMANAGER=$SDKMANAGER"
-
-          "$SDKMANAGER" --version || true
-
-          echo "Accepting Android SDK licenses..."
-
-          set +e
-          yes | timeout 180 \
-            "$SDKMANAGER" \
-            --sdk_root="$SDK_ROOT" \
-            --licenses \
-            > "$GITHUB_WORKSPACE/sdk-licenses.log" \
-            2>&1
-          set -e
-
-          PACKAGES=(
-            "platform-tools"
-            "platforms;android-${ANDROID_PLATFORM}"
-            "build-tools;${ANDROID_BUILD_TOOLS}"
-          )
-
-          install_package() {
-            local package="$1"
-            local safe="${package//[^A-Za-z0-9._-]/_}"
-            local log="$GITHUB_WORKSPACE/sdk-install-${safe}.log"
-            local attempt=1
-            local max_attempts=3
-
-            case "$package" in
-
-              platform-tools)
-                if [ -d "$SDK_ROOT/platform-tools" ]; then
-                  return 0
-                fi
-                ;;
-
-              "platforms;android-${ANDROID_PLATFORM}")
-                if [ -f \
-                  "$SDK_ROOT/platforms/android-${ANDROID_PLATFORM}/android.jar"
-                ]; then
-                  return 0
-                fi
-                ;;
-
-              "build-tools;${ANDROID_BUILD_TOOLS}")
-                if [ -d \
-                  "$SDK_ROOT/build-tools/${ANDROID_BUILD_TOOLS}"
-                ]; then
-                  return 0
-                fi
-                ;;
-            esac
-
-            while [ "$attempt" -le "$max_attempts" ]; do
-
-              echo ""
-              echo "Installing $package"
-              echo "Attempt $attempt/$max_attempts"
-
-              set +e
-
-              timeout 900 \
-                "$SDKMANAGER" \
-                --sdk_root="$SDK_ROOT" \
-                "$package" \
-                2>&1 | tee "$log"
-
-              rc=${PIPESTATUS[0]}
-
-              set -e
-
-              if [ "$rc" -eq 0 ]; then
-
-                case "$package" in
-
-                  platform-tools)
-                    if [ -d "$SDK_ROOT/platform-tools" ]; then
-                      return 0
-                    fi
-                    ;;
-
-                  "platforms;android-${ANDROID_PLATFORM}")
-                    if [ -f \
-                      "$SDK_ROOT/platforms/android-${ANDROID_PLATFORM}/android.jar"
-                    ]; then
-                      return 0
-                    fi
-                    ;;
-
-                  "build-tools;${ANDROID_BUILD_TOOLS}")
-                    if [ -d \
-                      "$SDK_ROOT/build-tools/${ANDROID_BUILD_TOOLS}"
-                    ]; then
-                      return 0
-                    fi
-                    ;;
-                esac
-              fi
-
-              echo "Installation not verified for $package."
-
-              tail -n 80 "$log" 2>/dev/null || true
-
-              sleep $((attempt * 5))
-
-              attempt=$((attempt + 1))
-            done
-
-            return 1
-          }
-
-          FAILED=""
-
-          for package in "${PACKAGES[@]}"; do
-            if ! install_package "$package"; then
-              FAILED="$package"
-              break
-            fi
-          done
-
-          if [ -n "$FAILED" ]; then
-
-            echo "::error::Failed to install or verify Android SDK package: $FAILED"
-
-            echo ""
-            echo "Installed packages:"
-
-            "$SDKMANAGER" \
-              --sdk_root="$SDK_ROOT" \
-              --list_installed \
-              2>&1 \
-              | tail -n 200 \
-              || true
-
-            exit 1
-          fi
-
-          echo ""
-          echo "Android SDK verification:"
-
-          test -f \
-            "$SDK_ROOT/platforms/android-${ANDROID_PLATFORM}/android.jar"
-
-          test -d \
-            "$SDK_ROOT/build-tools/${ANDROID_BUILD_TOOLS}"
-
-          test -d \
-            "$SDK_ROOT/platform-tools"
-
-          echo "Android SDK 36.1 + Build Tools 36.1.0: OK"
-
-      # ============================================================
-      # 09 - CONFIGURE LOCAL SDK PATH
-      # ============================================================
-      - name: "09 - Configure local.properties"
+      - name: "08 - Inspect project configuration"
         shell: bash
         run: |
           set -euo pipefail
 
           cd "$PROJECT_DIR"
 
+          echo "============================================================"
+          echo "PROJECT CONFIGURATION"
+          echo "============================================================"
+
+          echo ""
+          echo "settings.gradle.kts:"
+          cat settings.gradle.kts
+
+          echo ""
+          echo "root build.gradle.kts:"
+          cat build.gradle.kts
+
+          echo ""
+          echo "app/build.gradle.kts:"
+          cat app/build.gradle.kts
+
+          echo ""
+          echo "gradle/libs.versions.toml:"
+          cat gradle/libs.versions.toml
+
+          echo ""
+          echo "gradle.properties:"
+          cat gradle.properties
+
+          echo ""
+          echo "Gradle wrapper properties:"
+          cat gradle/wrapper/gradle-wrapper.properties
+
+      # ============================================================
+      # 09 - VERIFY EXACT TOOLCHAIN
+      # ============================================================
+      - name: "09 - Verify expected toolchain"
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          echo "============================================================"
+          echo "EXPECTED TOOLCHAIN"
+          echo "============================================================"
+
+          AGP_VERSION="$({
+            grep -E '^agp[[:space:]]*=' gradle/libs.versions.toml \
+              | sed -E 's/.*=[[:space:]]*"([^"]+)".*/\1/' \
+              | head -n 1 \
+              || true
+          })"
+
+          KOTLIN_VERSION="$({
+            grep -E '^kotlin[[:space:]]*=' gradle/libs.versions.toml \
+              | sed -E 's/.*=[[:space:]]*"([^"]+)".*/\1/' \
+              | head -n 1 \
+              || true
+          })"
+
+          KSP_VERSION="$({
+            grep -E '^googleDevtoolsKsp[[:space:]]*=' gradle/libs.versions.toml \
+              | sed -E 's/.*=[[:space:]]*"([^"]+)".*/\1/' \
+              | head -n 1 \
+              || true
+          })"
+
+          echo "AGP     = ${AGP_VERSION:-unknown}"
+          echo "Kotlin  = ${KOTLIN_VERSION:-unknown}"
+          echo "KSP     = ${KSP_VERSION:-unknown}"
+          echo "Gradle  = ${GRADLE_VERSION}"
+          echo "Java    = ${JAVA_VERSION}"
+          echo "SDK     = ${ANDROID_PLATFORM}"
+          echo "Tools   = ${ANDROID_BUILD_TOOLS}"
+
+      # ============================================================
+      # 10 - CONFIGURE CI TOOLCHAIN
+      #
+      # KSP 2.3.5 has a known CI error fixed in KSP 2.3.6.
+      # Patch only the extracted CI copy.
+      #
+      # This does NOT modify the original ZIP in the repository.
+      # ============================================================
+      - name: "10 - Apply CI compatibility fixes"
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          echo "============================================================"
+          echo "CI COMPATIBILITY FIXES"
+          echo "============================================================"
+
+          VERSION_FILE="gradle/libs.versions.toml"
+
+          if grep -q \
+            'googleDevtoolsKsp = "2\.3\.5"' \
+            "$VERSION_FILE"
+          then
+            echo "KSP 2.3.5 detected."
+            echo "Updating CI copy to KSP 2.3.6."
+
+            sed -i \
+              's/googleDevtoolsKsp = "2\.3\.5"/googleDevtoolsKsp = "2.3.6"/' \
+              "$VERSION_FILE"
+          fi
+
+          # CI should not depend on a previous configuration cache.
+          if grep -q '^org\.gradle\.configuration-cache=' gradle.properties; then
+            sed -i \
+              's/^org\.gradle\.configuration-cache=.*/org.gradle.configuration-cache=false/' \
+              gradle.properties
+          else
+            printf '\norg.gradle.configuration-cache=false\n' \
+              >> gradle.properties
+          fi
+
+          # Ensure CI memory settings are present.
+          if grep -q '^org\.gradle\.jvmargs=' gradle.properties; then
+            sed -i \
+              "s#^org\\.gradle\\.jvmargs=.*#org.gradle.jvmargs=${GRADLE_OPTS}#" \
+              gradle.properties
+          else
+            printf '\norg.gradle.jvmargs=%s\n' "$GRADLE_OPTS" \
+              >> gradle.properties
+          fi
+
+          echo ""
+          echo "KSP:"
+          grep -n 'googleDevtoolsKsp' "$VERSION_FILE" || true
+
+          echo ""
+          echo "Configuration cache:"
+          grep -n 'org.gradle.configuration-cache' gradle.properties || true
+
+          echo ""
+          echo "Gradle JVM:"
+          grep -n 'org.gradle.jvmargs' gradle.properties || true
+
+      # ============================================================
+      # 11 - SDK ROOT + SDKMANAGER
+      # ============================================================
+      - name: "11 - Locate Android SDK manager"
+        shell: bash
+        run: |
+          set -euo pipefail
+
           SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
 
           if [ -z "$SDK_ROOT" ]; then
-            echo "::error::Android SDK path is empty."
+            echo "::error::ANDROID_SDK_ROOT / ANDROID_HOME is empty."
             exit 1
           fi
+
+          export ANDROID_HOME="$SDK_ROOT"
+          export ANDROID_SDK_ROOT="$SDK_ROOT"
+
+          SDKMANAGER="$(command -v sdkmanager || true)"
+
+          if [ -z "$SDKMANAGER" ] && \
+             [ -x "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
+            SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          fi
+
+          if [ -z "$SDKMANAGER" ]; then
+            SDKMANAGER="$({
+              find "$SDK_ROOT/cmdline-tools" \
+                -type f \
+                -name sdkmanager \
+                -print \
+                -quit \
+                2>/dev/null || true
+            })"
+          fi
+
+          if [ -z "$SDKMANAGER" ] || [ ! -x "$SDKMANAGER" ]; then
+            echo "::error::sdkmanager executable not found."
+            exit 1
+          fi
+
+          echo "SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
+
+          echo ""
+          echo "SDK_ROOT=$SDK_ROOT"
+          echo "SDKMANAGER=$SDKMANAGER"
+
+          echo ""
+          echo "sdkmanager version:"
+          "$SDKMANAGER" --version || true
+
+      # ============================================================
+      # 12 - ACCEPT LICENSES
+      # ============================================================
+      - name: "12 - Accept Android SDK licenses"
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          echo "Accepting Android SDK licenses..."
+
+          yes | timeout 180 \
+            "$SDKMANAGER" \
+            --sdk_root="$SDK_ROOT" \
+            --licenses \
+            > "$GITHUB_WORKSPACE/sdk-licenses.log" \
+            2>&1
+
+          RC=$?
+
+          if [ "$RC" -ne 0 ]; then
+            echo "License command returned $RC."
+            tail -n 100 "$GITHUB_WORKSPACE/sdk-licenses.log" || true
+            echo "Continuing because setup-android already accepted the licenses."
+          else
+            echo "Android licenses accepted."
+          fi
+
+      # ============================================================
+      # 13 - INSTALL PLATFORM 36.1 + BUILD TOOLS
+      #
+      # Primary:
+      #   sdkmanager
+      #
+      # Fallback:
+      #   Direct download from Google's official repository.
+      #
+      # This is the important fix for Run 36052270695.
+      # ============================================================
+      - name: "13 - Install Android 36.1 SDK with fallback"
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          DIAG="$GITHUB_WORKSPACE/sdk-diagnostics"
+
+          rm -rf "$DIAG"
+          mkdir -p "$DIAG"
+
+          echo "============================================================"
+          echo "ANDROID SDK INSTALLATION"
+          echo "============================================================"
+
+          echo ""
+          echo "SDK root:"
+          echo "$SDK_ROOT"
+
+          echo ""
+          echo "Requested:"
+          echo "  Platform:     $ANDROID_PLATFORM"
+          echo "  Build Tools:  $ANDROID_BUILD_TOOLS"
+
+          # --------------------------------------------------------
+          # Helper: verify platform
+          # --------------------------------------------------------
+          platform_ok() {
+            [ -f \
+              "$SDK_ROOT/platforms/android-${ANDROID_PLATFORM}/android.jar" \
+            ]
+          }
+
+          # --------------------------------------------------------
+          # Helper: verify build tools
+          # --------------------------------------------------------
+          build_tools_ok() {
+            [ -x \
+              "$SDK_ROOT/build-tools/${ANDROID_BUILD_TOOLS}/aapt2" \
+            ] || \
+            [ -x \
+              "$SDK_ROOT/build-tools/${ANDROID_BUILD_TOOLS}/aapt" \
+            ]
+          }
+
+          # --------------------------------------------------------
+          # PLATFORM
+          # --------------------------------------------------------
+          echo ""
+          echo "============================================================"
+          echo "PLATFORM 36.1"
+          echo "============================================================"
+
+          if platform_ok; then
+            echo "Platform 36.1 already exists."
+          else
+
+            echo "Trying sdkmanager..."
+
+            set +e
+
+            timeout 1200 \
+              "$SDKMANAGER" \
+              --sdk_root="$SDK_ROOT" \
+              --channel=0 \
+              "platforms;android-${ANDROID_PLATFORM}" \
+              > "$DIAG/platform-sdkmanager.log" \
+              2>&1
+
+            PLATFORM_RC=$?
+
+            set -e
+
+            if [ "$PLATFORM_RC" -eq 0 ] && platform_ok; then
+
+              echo "Platform 36.1 installed successfully through sdkmanager."
+
+            else
+
+              echo ""
+              echo "sdkmanager could not provide a verified Platform 36.1."
+              echo "Using direct Google archive fallback."
+
+              tail -n 120 \
+                "$DIAG/platform-sdkmanager.log" \
+                || true
+
+              TEMP_DIR="$RUNNER_TEMP/android-platform-36.1"
+
+              rm -rf "$TEMP_DIR"
+
+              mkdir -p "$TEMP_DIR"
+
+              PLATFORM_ZIP="$TEMP_DIR/platform-36.1_r01.zip"
+
+              echo ""
+              echo "Downloading:"
+              echo "$ANDROID_PLATFORM_URL"
+
+              curl \
+                --fail \
+                --show-error \
+                --location \
+                --retry 6 \
+                --retry-delay 5 \
+                --connect-timeout 30 \
+                --max-time 1200 \
+                "$ANDROID_PLATFORM_URL" \
+                --output "$PLATFORM_ZIP"
+
+              echo ""
+              echo "Downloaded platform archive:"
+              ls -lh "$PLATFORM_ZIP"
+
+              echo ""
+              echo "Testing archive:"
+              unzip -t "$PLATFORM_ZIP" > "$DIAG/platform-unzip-test.log"
+
+              PLATFORM_SHA1="$({
+                sha1sum "$PLATFORM_ZIP" \
+                  | awk '{print $1}'
+              })"
+
+              EXPECTED_PLATFORM_SHA1="f87dc23b7ddba6934908da6cfb58fd5b258077ce"
+
+              echo "Platform SHA1:"
+              echo "$PLATFORM_SHA1"
+
+              echo "Expected SHA1:"
+              echo "$EXPECTED_PLATFORM_SHA1"
+
+              if [ "$PLATFORM_SHA1" != "$EXPECTED_PLATFORM_SHA1" ]; then
+                echo "::error::Platform 36.1 archive checksum mismatch."
+                exit 1
+              fi
+
+              EXTRACT_DIR="$TEMP_DIR/extracted"
+
+              rm -rf "$EXTRACT_DIR"
+
+              mkdir -p "$EXTRACT_DIR"
+
+              unzip -q \
+                "$PLATFORM_ZIP" \
+                -d "$EXTRACT_DIR"
+
+              PLATFORM_SOURCE="$({
+                find "$EXTRACT_DIR" \
+                  -type f \
+                  -name android.jar \
+                  -print \
+                  -quit \
+                  2>/dev/null || true
+              })"
+
+              if [ -z "$PLATFORM_SOURCE" ]; then
+                echo "::error::android.jar was not found in the downloaded Platform 36.1 archive."
+                find "$EXTRACT_DIR" -maxdepth 5 -print || true
+                exit 1
+              fi
+
+              PLATFORM_SOURCE_DIR="$(dirname "$PLATFORM_SOURCE")"
+
+              PLATFORM_DEST="$SDK_ROOT/platforms/android-${ANDROID_PLATFORM}"
+
+              rm -rf "$PLATFORM_DEST"
+
+              mkdir -p "$PLATFORM_DEST"
+
+              cp -a \
+                "$PLATFORM_SOURCE_DIR"/. \
+                "$PLATFORM_DEST"/
+
+              if ! platform_ok; then
+                echo "::error::Platform 36.1 direct installation failed."
+                exit 1
+              fi
+
+              echo "Platform 36.1 direct installation successful."
+            fi
+          fi
+
+          # --------------------------------------------------------
+          # BUILD TOOLS
+          # --------------------------------------------------------
+          echo ""
+          echo "============================================================"
+          echo "BUILD TOOLS 36.1.0"
+          echo "============================================================"
+
+          if build_tools_ok; then
+            echo "Build Tools 36.1.0 already exists."
+          else
+
+            echo "Trying sdkmanager..."
+
+            set +e
+
+            timeout 1200 \
+              "$SDKMANAGER" \
+              --sdk_root="$SDK_ROOT" \
+              --channel=0 \
+              "build-tools;${ANDROID_BUILD_TOOLS}" \
+              > "$DIAG/build-tools-sdkmanager.log" \
+              2>&1
+
+            BUILD_TOOLS_RC=$?
+
+            set -e
+
+            if [ "$BUILD_TOOLS_RC" -eq 0 ] && build_tools_ok; then
+
+              echo "Build Tools 36.1.0 installed through sdkmanager."
+
+            else
+
+              echo ""
+              echo "sdkmanager could not provide verified Build Tools 36.1.0."
+              echo "Using direct Google archive fallback."
+
+              tail -n 120 \
+                "$DIAG/build-tools-sdkmanager.log" \
+                || true
+
+              TEMP_DIR="$RUNNER_TEMP/android-build-tools-36.1"
+
+              rm -rf "$TEMP_DIR"
+
+              mkdir -p "$TEMP_DIR"
+
+              BUILD_TOOLS_ZIP="$TEMP_DIR/build-tools_r36.1_linux.zip"
+
+              echo ""
+              echo "Downloading:"
+              echo "$ANDROID_BUILD_TOOLS_URL"
+
+              curl \
+                --fail \
+                --show-error \
+                --location \
+                --retry 6 \
+                --retry-delay 5 \
+                --connect-timeout 30 \
+                --max-time 1200 \
+                "$ANDROID_BUILD_TOOLS_URL" \
+                --output "$BUILD_TOOLS_ZIP"
+
+              echo ""
+              echo "Downloaded build tools archive:"
+              ls -lh "$BUILD_TOOLS_ZIP"
+
+              echo ""
+              echo "Testing archive:"
+              unzip -t "$BUILD_TOOLS_ZIP" \
+                > "$DIAG/build-tools-unzip-test.log"
+
+              EXTRACT_DIR="$TEMP_DIR/extracted"
+
+              rm -rf "$EXTRACT_DIR"
+
+              mkdir -p "$EXTRACT_DIR"
+
+              unzip -q \
+                "$BUILD_TOOLS_ZIP" \
+                -d "$EXTRACT_DIR"
+
+              BUILD_TOOL_BINARY="$({
+                find "$EXTRACT_DIR" \
+                  -type f \
+                  \( \
+                    -name aapt2 \
+                    -o -name aapt \
+                  \) \
+                  -print \
+                  -quit \
+                  2>/dev/null || true
+              })"
+
+              if [ -z "$BUILD_TOOL_BINARY" ]; then
+                echo "::error::aapt/aapt2 not found in Build Tools archive."
+                find "$EXTRACT_DIR" \
+                  -maxdepth 6 \
+                  -print \
+                  | sort \
+                  | tail -n 300 \
+                  || true
+                exit 1
+              fi
+
+              BUILD_TOOLS_SOURCE_DIR="$(dirname "$BUILD_TOOL_BINARY")"
+
+              BUILD_TOOLS_DEST="$SDK_ROOT/build-tools/${ANDROID_BUILD_TOOLS}"
+
+              rm -rf "$BUILD_TOOLS_DEST"
+
+              mkdir -p "$BUILD_TOOLS_DEST"
+
+              cp -a \
+                "$BUILD_TOOLS_SOURCE_DIR"/. \
+                "$BUILD_TOOLS_DEST"/
+
+              chmod +x \
+                "$BUILD_TOOLS_DEST"/* \
+                2>/dev/null || true
+
+              if ! build_tools_ok; then
+                echo "::error::Build Tools 36.1.0 direct installation failed."
+                exit 1
+              fi
+
+              echo "Build Tools 36.1.0 direct installation successful."
+            fi
+          fi
+
+          # --------------------------------------------------------
+          # PLATFORM TOOLS
+          # --------------------------------------------------------
+          if [ ! -x "$SDK_ROOT/platform-tools/adb" ]; then
+
+            echo ""
+            echo "Installing platform-tools..."
+
+            set +e
+
+            timeout 600 \
+              "$SDKMANAGER" \
+              --sdk_root="$SDK_ROOT" \
+              "platform-tools" \
+              > "$DIAG/platform-tools.log" \
+              2>&1
+
+            PLATFORM_TOOLS_RC=$?
+
+            set -e
+
+            if [ "$PLATFORM_TOOLS_RC" -ne 0 ] || \
+               [ ! -x "$SDK_ROOT/platform-tools/adb" ]
+            then
+
+              echo "::error::platform-tools could not be installed."
+
+              tail -n 120 \
+                "$DIAG/platform-tools.log" \
+                2>/dev/null \
+                || true
+
+              exit 1
+            fi
+          fi
+
+          # --------------------------------------------------------
+          # FINAL VERIFICATION
+          # --------------------------------------------------------
+          echo ""
+          echo "============================================================"
+          echo "FINAL SDK VERIFICATION"
+          echo "============================================================"
+
+          echo ""
+          echo "Platform:"
+          test -f \
+            "$SDK_ROOT/platforms/android-${ANDROID_PLATFORM}/android.jar"
+
+          echo "OK: Platform 36.1"
+
+          echo ""
+          echo "Build Tools:"
+          test -x \
+            "$SDK_ROOT/build-tools/${ANDROID_BUILD_TOOLS}/aapt2" \
+            || \
+          test -x \
+            "$SDK_ROOT/build-tools/${ANDROID_BUILD_TOOLS}/aapt"
+
+          echo "OK: Build Tools 36.1.0"
+
+          echo ""
+          echo "Platform Tools:"
+          test -x \
+            "$SDK_ROOT/platform-tools/adb"
+
+          echo "OK: platform-tools"
+
+          echo ""
+          echo "SDK installation completed successfully."
+
+      # ============================================================
+      # 14 - CONFIGURE LOCAL.PROPERTIES
+      # ============================================================
+      - name: "14 - Configure Android SDK path"
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
 
           printf 'sdk.dir=%s\n' "$SDK_ROOT" > local.properties
 
@@ -385,50 +838,9 @@ jobs:
           cat local.properties
 
       # ============================================================
-      # 10 - VERIFY ACTUAL ZIP TOOLCHAIN
+      # 15 - CREATE DEBUG KEYSTORE
       # ============================================================
-      - name: "10 - Verify project configuration"
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cd "$PROJECT_DIR"
-
-          echo "============================================================"
-          echo "PROJECT TOOLCHAIN"
-          echo "============================================================"
-
-          echo ""
-          echo "AGP:"
-          grep -n 'agp =' gradle/libs.versions.toml
-
-          echo ""
-          echo "Kotlin:"
-          grep -n '^kotlin =' gradle/libs.versions.toml
-
-          echo ""
-          echo "KSP:"
-          grep -n 'googleDevtoolsKsp' gradle/libs.versions.toml
-
-          echo ""
-          echo "compileSdk:"
-          grep -n -A5 -B2 'compileSdk' app/build.gradle.kts
-
-          echo ""
-          echo "applicationId:"
-          grep -n 'applicationId' app/build.gradle.kts
-
-          echo ""
-          echo "Gradle wrapper properties:"
-          cat gradle/wrapper/gradle-wrapper.properties
-
-          echo ""
-          echo "Source project files verified."
-
-      # ============================================================
-      # 11 - GENERATE MISSING DEBUG KEYSTORE
-      # ============================================================
-      - name: "11 - Generate debug keystore"
+      - name: "15 - Generate debug keystore"
         shell: bash
         run: |
           set -euo pipefail
@@ -437,9 +849,13 @@ jobs:
 
           DEBUG_KEYSTORE="$PROJECT_DIR/debug.keystore"
 
-          if [ ! -f "$DEBUG_KEYSTORE" ]; then
+          if [ -f "$DEBUG_KEYSTORE" ]; then
 
-            echo "Generating missing debug.keystore..."
+            echo "debug.keystore already exists."
+
+          else
+
+            echo "Creating debug.keystore..."
 
             keytool \
               -genkeypair \
@@ -453,10 +869,6 @@ jobs:
               -validity 10000 \
               -dname "CN=Android Debug,O=Android,C=US"
 
-          else
-
-            echo "debug.keystore already exists."
-
           fi
 
           test -f "$DEBUG_KEYSTORE"
@@ -468,12 +880,14 @@ jobs:
             -alias androiddebugkey \
             >/dev/null
 
-          echo "Debug keystore verified."
+          echo "debug.keystore verified."
 
       # ============================================================
-      # 12 - SETUP GRADLE AFTER ZIP EXTRACTION
+      # 16 - SETUP GRADLE
+      #
+      # This is intentionally AFTER ZIP extraction.
       # ============================================================
-      - name: "12 - Setup Gradle 9.3.1"
+      - name: "16 - Setup Gradle 9.3.1"
         uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: "9.3.1"
@@ -482,14 +896,19 @@ jobs:
           add-job-summary: on-failure
 
       # ============================================================
-      # 13 - VERIFY JAVA + GRADLE
+      # 17 - VERIFY JAVA / GRADLE / SDK
       # ============================================================
-      - name: "13 - Verify Java and Gradle"
+      - name: "17 - Verify complete build environment"
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Java:"
+          cd "$PROJECT_DIR"
+
+          echo "============================================================"
+          echo "JAVA"
+          echo "============================================================"
+
           java -version
 
           echo ""
@@ -497,251 +916,232 @@ jobs:
           echo "$JAVA_HOME"
 
           echo ""
-          echo "Gradle:"
+          echo "============================================================"
+          echo "GRADLE"
+          echo "============================================================"
+
           gradle --version
 
+          echo ""
+          echo "============================================================"
+          echo "ANDROID SDK"
+          echo "============================================================"
+
+          echo "SDK_ROOT=$SDK_ROOT"
+
+          echo ""
+          echo "android.jar:"
+          ls -lh \
+            "$SDK_ROOT/platforms/android-${ANDROID_PLATFORM}/android.jar"
+
+          echo ""
+          echo "aapt2:"
+          ls -lh \
+            "$SDK_ROOT/build-tools/${ANDROID_BUILD_TOOLS}/aapt2"
+
+          echo ""
+          echo "adb:"
+          ls -lh \
+            "$SDK_ROOT/platform-tools/adb"
+
       # ============================================================
-      # 14 - BUILD DEBUG APK
+      # 18 - GRADLE CONFIGURATION CHECK
       # ============================================================
-      - name: "14 - Build Debug APK"
+      - name: "18 - Validate Gradle configuration"
         shell: bash
         run: |
           set -uo pipefail
 
           cd "$PROJECT_DIR"
 
-          LOG1="$GITHUB_WORKSPACE/gradle-build-attempt-1.log"
-          LOG2="$GITHUB_WORKSPACE/gradle-build-attempt-2.log"
-          LOG3="$GITHUB_WORKSPACE/gradle-build-attempt-3.log"
+          LOG="$GITHUB_WORKSPACE/gradle-help.log"
 
-          rm -f \
-            "$LOG1" \
-            "$LOG2" \
-            "$LOG3" \
-            "$GITHUB_WORKSPACE/gradle-build.log"
-
-          GRADLE_ARGS=(
-            ":app:assembleDebug"
-            "--no-daemon"
-            "--stacktrace"
-            "--console=plain"
-            "--warning-mode=all"
-            "--no-configuration-cache"
-            "--rerun-tasks"
-          )
-
-          run_build() {
-            local logfile="$1"
-            shift
-
-            set +e
-
-            gradle \
-              "${GRADLE_ARGS[@]}" \
-              "$@" \
-              2>&1 | tee "$logfile"
-
-            local rc=${PIPESTATUS[0]}
-
-            set -e
-
-            return "$rc"
-          }
+          rm -f "$LOG"
 
           echo "============================================================"
-          echo "BUILD ATTEMPT 1"
+          echo "GRADLE CONFIGURATION"
           echo "============================================================"
 
-          if run_build "$LOG1"; then
+          set +e
 
-            cp \
-              "$LOG1" \
-              "$GITHUB_WORKSPACE/gradle-build.log"
+          gradle \
+            help \
+            --no-daemon \
+            --stacktrace \
+            --console=plain \
+            --warning-mode=all \
+            --no-configuration-cache \
+            2>&1 | tee "$LOG"
 
-            echo "BUILD SUCCESSFUL ON ATTEMPT 1"
+          RC=${PIPESTATUS[0]}
 
-            exit 0
+          set -e
+
+          if [ "$RC" -ne 0 ]; then
+
+            echo ""
+            echo "============================================================"
+            echo "GRADLE CONFIGURATION FAILED"
+            echo "============================================================"
+
+            echo ""
+            echo "Relevant errors:"
+            grep -n -E \
+              'FAILURE:|ERROR|error:|Exception|Caused by:|KSP|Room|Moshi|Plugin|Gradle|Android Gradle|Kotlin' \
+              "$LOG" \
+              | tail -n 300 \
+              || true
+
+            echo ""
+            echo "Last 400 lines:"
+            tail -n 400 "$LOG"
+
+            exit "$RC"
           fi
 
           echo ""
-          echo "Attempt 1 failed."
-          echo "Checking for known KSP 2.3.5 CI failure..."
-
-          KSP_FAILURE="false"
-
-          if grep -qE \
-            'ApplicationManager\.getApplication\(\).*null|return value of.*ApplicationManager\.getApplication\(\).*null' \
-            "$LOG1" \
-            2>/dev/null
-          then
-            KSP_FAILURE="true"
-          fi
-
-          if [ "$KSP_FAILURE" = "true" ] && \
-             grep -q \
-               'googleDevtoolsKsp = "2\.3\.5"' \
-               gradle/libs.versions.toml \
-               2>/dev/null
-          then
-
-            echo "Known KSP 2.3.5 CI failure detected."
-
-            echo "Applying temporary CI-only KSP 2.3.6 compatibility patch."
-
-            cp \
-              gradle/libs.versions.toml \
-              "$GITHUB_WORKSPACE/libs.versions.toml.before-ksp-patch"
-
-            sed -i \
-              's/googleDevtoolsKsp = "2\.3\.5"/googleDevtoolsKsp = "2.3.6"/' \
-              gradle/libs.versions.toml
-
-            echo "KSP after temporary patch:"
-
-            grep -n \
-              'googleDevtoolsKsp' \
-              gradle/libs.versions.toml
-          fi
-
-          gradle --stop >/dev/null 2>&1 || true
-
-          rm -rf \
-            .gradle \
-            app/build \
-            2>/dev/null || true
-
-          echo ""
-          echo "============================================================"
-          echo "BUILD ATTEMPT 2"
-          echo "============================================================"
-
-          if run_build \
-            "$LOG2" \
-            "--no-build-cache"
-          then
-
-            cat \
-              "$LOG1" \
-              "$LOG2" \
-              > "$GITHUB_WORKSPACE/gradle-build.log"
-
-            echo "BUILD SUCCESSFUL ON ATTEMPT 2"
-
-            exit 0
-          fi
-
-          echo ""
-          echo "Attempt 2 failed."
-
-          echo "Retrying with refreshed dependencies..."
-
-          gradle --stop >/dev/null 2>&1 || true
-
-          rm -rf \
-            .gradle \
-            app/build \
-            2>/dev/null || true
-
-          echo ""
-          echo "============================================================"
-          echo "BUILD ATTEMPT 3"
-          echo "============================================================"
-
-          if run_build \
-            "$LOG3" \
-            "--no-build-cache" \
-            "--refresh-dependencies"
-          then
-
-            cat \
-              "$LOG1" \
-              "$LOG2" \
-              "$LOG3" \
-              > "$GITHUB_WORKSPACE/gradle-build.log"
-
-            echo "BUILD SUCCESSFUL ON ATTEMPT 3"
-
-            exit 0
-          fi
-
-          cat \
-            "$LOG1" \
-            "$LOG2" \
-            "$LOG3" \
-            > "$GITHUB_WORKSPACE/gradle-build.log"
-
-          echo ""
-          echo "============================================================"
-          echo "BUILD FAILED"
-          echo "============================================================"
-
-          echo ""
-          echo "---------------- KSP ----------------"
-
-          grep -n -E \
-            'KSP|ksp|symbol-processing|ApplicationManager' \
-            "$GITHUB_WORKSPACE/gradle-build.log" \
-            | tail -n 220 \
-            || true
-
-          echo ""
-          echo "---------------- SDK / AAPT ----------------"
-
-          grep -n -E \
-            'compileSdk|36\.1|buildTools|SDK|AAPT|android\.jar|resource .* not found|Manifest merger' \
-            "$GITHUB_WORKSPACE/gradle-build.log" \
-            | tail -n 220 \
-            || true
-
-          echo ""
-          echo "---------------- Kotlin / Java ----------------"
-
-          grep -n -E \
-            'Kotlin|KotlinCompile|jvmTarget|JVM target|Unsupported class file|Inconsistent JVM|Java|OutOfMemory|Metaspace' \
-            "$GITHUB_WORKSPACE/gradle-build.log" \
-            | tail -n 220 \
-            || true
-
-          echo ""
-          echo "---------------- Dependencies / Network ----------------"
-
-          grep -n -E \
-            'Could not resolve|Could not find|Could not download|TLS|SSL|PKIX|timeout|timed out|Connection reset|Connection refused|UnknownHost' \
-            "$GITHUB_WORKSPACE/gradle-build.log" \
-            | tail -n 220 \
-            || true
-
-          echo ""
-          echo "---------------- Signing ----------------"
-
-          grep -n -E \
-            'signing|keystore|androiddebugkey|storePassword|keyPassword' \
-            "$GITHUB_WORKSPACE/gradle-build.log" \
-            | tail -n 160 \
-            || true
-
-          echo ""
-          echo "---------------- Gradle ----------------"
-
-          grep -n -E \
-            'FAILURE:|Execution failed for task|Task .* FAILED|Exception|Caused by:|error:' \
-            "$GITHUB_WORKSPACE/gradle-build.log" \
-            | tail -n 320 \
-            || true
-
-          echo ""
-          echo "---------------- LAST 500 LINES ----------------"
-
-          tail -n 500 \
-            "$GITHUB_WORKSPACE/gradle-build.log" \
-            || true
-
-          exit 1
+          echo "Gradle configuration is valid."
 
       # ============================================================
-      # 15 - LOCATE APK
+      # 19 - VERIFY APP TASKS
       # ============================================================
-      - name: "15 - Locate generated APK"
+      - name: "19 - Verify Android application tasks"
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          gradle \
+            :app:tasks \
+            --all \
+            --no-daemon \
+            --stacktrace \
+            --console=plain \
+            --warning-mode=all \
+            --no-configuration-cache \
+            2>&1 | tee "$GITHUB_WORKSPACE/gradle-tasks.log"
+
+      # ============================================================
+      # 20 - BUILD DEBUG APK
+      # ============================================================
+      - name: "20 - Build Debug APK"
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          cd "$PROJECT_DIR"
+
+          LOG="$GITHUB_WORKSPACE/gradle-build.log"
+
+          rm -f "$LOG"
+
+          echo "============================================================"
+          echo "BUILD DEBUG APK"
+          echo "============================================================"
+
+          echo ""
+          echo "Project:"
+          echo "$PROJECT_DIR"
+
+          echo ""
+          echo "Gradle:"
+          gradle --version || true
+
+          echo ""
+          echo "Java:"
+          java -version 2>&1 || true
+
+          echo ""
+          echo "SDK:"
+          echo "$SDK_ROOT"
+
+          set +e
+
+          gradle \
+            :app:assembleDebug \
+            --no-daemon \
+            --stacktrace \
+            --console=plain \
+            --warning-mode=all \
+            --no-configuration-cache \
+            --rerun-tasks \
+            --no-build-cache \
+            2>&1 | tee "$LOG"
+
+          RC=${PIPESTATUS[0]}
+
+          set -e
+
+          if [ "$RC" -ne 0 ]; then
+
+            echo ""
+            echo "============================================================"
+            echo "APK BUILD FAILED"
+            echo "============================================================"
+
+            echo ""
+            echo "---------------- KSP ----------------"
+
+            grep -n -E \
+              'KSP|ksp|symbol-processing|ApplicationManager' \
+              "$LOG" \
+              | tail -n 250 \
+              || true
+
+            echo ""
+            echo "---------------- SDK / AAPT ----------------"
+
+            grep -n -E \
+              'compileSdk|36\.1|android\.jar|AAPT|aapt2|resource .* not found|Manifest merger|SDK' \
+              "$LOG" \
+              | tail -n 250 \
+              || true
+
+            echo ""
+            echo "---------------- Kotlin / Java ----------------"
+
+            grep -n -E \
+              'Kotlin|KotlinCompile|jvmTarget|JVM target|Unsupported class file|Inconsistent JVM|Java|OutOfMemory|Metaspace' \
+              "$LOG" \
+              | tail -n 250 \
+              || true
+
+            echo ""
+            echo "---------------- Dependencies ----------------"
+
+            grep -n -E \
+              'Could not resolve|Could not find|Could not download|TLS|SSL|PKIX|timeout|timed out|Connection reset|Connection refused|UnknownHost' \
+              "$LOG" \
+              | tail -n 250 \
+              || true
+
+            echo ""
+            echo "---------------- Gradle ----------------"
+
+            grep -n -E \
+              'FAILURE:|Execution failed for task|Task .* FAILED|Exception|Caused by:|error:' \
+              "$LOG" \
+              | tail -n 350 \
+              || true
+
+            echo ""
+            echo "---------------- LAST 500 LINES ----------------"
+
+            tail -n 500 "$LOG"
+
+            exit "$RC"
+          fi
+
+          echo ""
+          echo "============================================================"
+          echo "BUILD SUCCESSFUL"
+          echo "============================================================"
+
+      # ============================================================
+      # 21 - FIND APK
+      # ============================================================
+      - name: "21 - Locate generated APK"
         if: success()
         shell: bash
         run: |
@@ -754,11 +1154,14 @@ jobs:
           rm -rf "$OUTPUT_DIR"
           mkdir -p "$OUTPUT_DIR"
 
-          EXPECTED="app/build/outputs/apk/debug/app-debug.apk"
+          EXPECTED_APK="app/build/outputs/apk/debug/app-debug.apk"
 
-          if [ ! -f "$EXPECTED" ]; then
+          echo "Expected APK:"
+          echo "$EXPECTED_APK"
 
-            echo "::error::Expected debug APK was not generated."
+          if [ ! -f "$EXPECTED_APK" ]; then
+
+            echo "::error::Expected APK does not exist."
 
             echo ""
             echo "All APK files found:"
@@ -775,19 +1178,18 @@ jobs:
           fi
 
           cp \
-            "$EXPECTED" \
+            "$EXPECTED_APK" \
             "$OUTPUT_DIR/TikTok-Downloader-debug.apk"
 
           echo ""
-          echo "Generated APK:"
-
+          echo "APK:"
           ls -lh \
             "$OUTPUT_DIR/TikTok-Downloader-debug.apk"
 
       # ============================================================
-      # 16 - APK INFORMATION
+      # 22 - INSPECT APK
       # ============================================================
-      - name: "16 - Inspect APK"
+      - name: "22 - Inspect generated APK"
         if: success()
         shell: bash
         run: |
@@ -801,27 +1203,26 @@ jobs:
           echo "APK INFORMATION"
           echo "============================================================"
 
-          ls -lh "$APK"
-
           echo ""
           echo "File:"
-
           file "$APK"
 
           echo ""
-          echo "SHA256:"
+          echo "Size:"
+          ls -lh "$APK"
 
+          echo ""
+          echo "SHA256:"
           sha256sum "$APK"
 
           echo ""
           echo "APK summary:"
-
           apkanalyzer apk summary "$APK" || true
 
       # ============================================================
-      # 17 - UPLOAD APK
+      # 23 - UPLOAD APK
       # ============================================================
-      - name: "17 - Upload APK"
+      - name: "23 - Upload APK"
         if: success()
         uses: actions/upload-artifact@v6
         with:
@@ -832,9 +1233,9 @@ jobs:
           compression-level: 0
 
       # ============================================================
-      # 18 - COLLECT DIAGNOSTICS
+      # 24 - COLLECT DIAGNOSTICS
       # ============================================================
-      - name: "18 - Collect diagnostics"
+      - name: "24 - Collect diagnostics"
         if: always()
         shell: bash
         run: |
@@ -846,76 +1247,78 @@ jobs:
           mkdir -p "$DIAG"
 
           copy_if_exists() {
-            local src="$1"
-            local dst="$2"
+            local SRC="$1"
+            local DST="$2"
 
-            if [ -f "$src" ]; then
-              cp "$src" "$dst" || true
+            if [ -f "$SRC" ]; then
+              cp "$SRC" "$DST" || true
             fi
           }
+
+          copy_if_exists \
+            "$GITHUB_WORKSPACE/gradle-help.log" \
+            "$DIAG/gradle-help.log"
+
+          copy_if_exists \
+            "$GITHUB_WORKSPACE/gradle-tasks.log" \
+            "$DIAG/gradle-tasks.log"
 
           copy_if_exists \
             "$GITHUB_WORKSPACE/gradle-build.log" \
             "$DIAG/gradle-build.log"
 
           copy_if_exists \
-            "$GITHUB_WORKSPACE/gradle-build-attempt-1.log" \
-            "$DIAG/gradle-build-attempt-1.log"
-
-          copy_if_exists \
-            "$GITHUB_WORKSPACE/gradle-build-attempt-2.log" \
-            "$DIAG/gradle-build-attempt-2.log"
-
-          copy_if_exists \
-            "$GITHUB_WORKSPACE/gradle-build-attempt-3.log" \
-            "$DIAG/gradle-build-attempt-3.log"
-
-          copy_if_exists \
             "$GITHUB_WORKSPACE/sdk-licenses.log" \
             "$DIAG/sdk-licenses.log"
 
-          copy_if_exists \
-            "$GITHUB_WORKSPACE/libs.versions.toml.before-ksp-patch" \
-            "$DIAG/libs.versions.toml.before-ksp-patch"
-
-          if [ -d "$GITHUB_WORKSPACE/android-project" ]; then
-
-            find "$GITHUB_WORKSPACE/android-project" \
-              -maxdepth 10 \
-              -type f \
-              \( \
-                -name 'settings.gradle*' \
-                -o -name 'build.gradle*' \
-                -o -name 'gradle.properties' \
-                -o -name '*.toml' \
-                -o -name 'AndroidManifest.xml' \
-                -o -name 'gradle-wrapper.properties' \
-              \) \
-              -print \
-              | sort \
-              > "$DIAG/project-build-files.txt" \
-              || true
-
-            cp \
-              "$GITHUB_WORKSPACE/android-project/gradle/wrapper/gradle-wrapper.properties" \
-              "$DIAG/gradle-wrapper.properties" \
-              2>/dev/null \
-              || true
-
-            cp \
-              "$GITHUB_WORKSPACE/android-project/gradle/libs.versions.toml" \
-              "$DIAG/libs.versions.toml.final" \
-              2>/dev/null \
-              || true
-
-            cp \
-              "$GITHUB_WORKSPACE/android-project/app/build.gradle.kts" \
-              "$DIAG/app-build.gradle.kts" \
-              2>/dev/null \
+          if [ -d "$GITHUB_WORKSPACE/sdk-diagnostics" ]; then
+            cp -R \
+              "$GITHUB_WORKSPACE/sdk-diagnostics" \
+              "$DIAG/sdk-diagnostics" \
               || true
           fi
 
-          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+          if [ -n "${PROJECT_DIR:-}" ] && \
+             [ -d "$PROJECT_DIR" ]; then
+
+            copy_if_exists \
+              "$PROJECT_DIR/settings.gradle.kts" \
+              "$DIAG/settings.gradle.kts"
+
+            copy_if_exists \
+              "$PROJECT_DIR/build.gradle.kts" \
+              "$DIAG/root-build.gradle.kts"
+
+            copy_if_exists \
+              "$PROJECT_DIR/app/build.gradle.kts" \
+              "$DIAG/app-build.gradle.kts"
+
+            copy_if_exists \
+              "$PROJECT_DIR/gradle/libs.versions.toml" \
+              "$DIAG/libs.versions.toml"
+
+            copy_if_exists \
+              "$PROJECT_DIR/gradle.properties" \
+              "$DIAG/gradle.properties"
+
+            copy_if_exists \
+              "$PROJECT_DIR/gradle/wrapper/gradle-wrapper.properties" \
+              "$DIAG/gradle-wrapper.properties"
+
+            copy_if_exists \
+              "$PROJECT_DIR/local.properties" \
+              "$DIAG/local.properties"
+
+            find "$PROJECT_DIR" \
+              -maxdepth 12 \
+              -type f \
+              -print \
+              | sort \
+              > "$DIAG/project-tree.txt" \
+              || true
+          fi
+
+          SDK_ROOT_SAFE="${SDK_ROOT:-}"
 
           {
             echo "============================================================"
@@ -925,29 +1328,45 @@ jobs:
             echo "Repository: ${GITHUB_REPOSITORY:-unknown}"
             echo "Commit: ${GITHUB_SHA:-unknown}"
             echo "Run: ${GITHUB_RUN_ID:-unknown}"
-            echo "Project: ${PROJECT_DIR:-unknown}"
-            echo "SDK: ${SDK_ROOT:-unknown}"
 
+            echo ""
+            echo "Project:"
+            echo "${PROJECT_DIR:-unknown}"
+
+            echo ""
             echo "Java:"
             java -version 2>&1 || true
+
+            echo ""
+            echo "JAVA_HOME:"
+            echo "${JAVA_HOME:-unknown}"
 
             echo ""
             echo "Gradle:"
             gradle --version 2>&1 || true
 
             echo ""
-            echo "SDK packages:"
+            echo "Android SDK:"
+            echo "${SDK_ROOT_SAFE:-unknown}"
 
-            if [ -n "$SDK_ROOT" ] && \
-               command -v sdkmanager >/dev/null 2>&1
-            then
+            echo ""
+            echo "Required platform:"
+            echo "${ANDROID_PLATFORM}"
 
-              sdkmanager \
-                --sdk_root="$SDK_ROOT" \
+            echo ""
+            echo "Required build tools:"
+            echo "${ANDROID_BUILD_TOOLS}"
+
+            echo ""
+            echo "Installed SDK packages:"
+            if [ -n "$SDK_ROOT_SAFE" ] && \
+               [ -x "$SDKMANAGER" ]; then
+
+              "$SDKMANAGER" \
+                --sdk_root="$SDK_ROOT_SAFE" \
                 --list_installed \
                 2>&1 \
                 || true
-
             fi
 
           } > "$DIAG/environment.txt"
@@ -955,9 +1374,9 @@ jobs:
           echo "Diagnostics collected."
 
       # ============================================================
-      # 19 - UPLOAD DIAGNOSTICS
+      # 25 - UPLOAD DIAGNOSTICS
       # ============================================================
-      - name: "19 - Upload diagnostics"
+      - name: "25 - Upload diagnostics"
         if: always()
         uses: actions/upload-artifact@v6
         with:
