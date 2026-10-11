@@ -1,4 +1,5 @@
-name: Build Chess Assistant APK
+
+name: Build Android APK
 
 on:
   push:
@@ -6,928 +7,231 @@ on:
       - main
 
   workflow_dispatch:
+    inputs:
+      project_zip:
+        description: "ZIP path inside the repository, or auto"
+        required: false
+        default: auto
+        type: string
 
 permissions:
   contents: read
 
-env:
-  JAVA_VERSION: "17"
-  GRADLE_VERSION: "9.3.1"
-
-  ANDROID_PLATFORM: "android-36.1"
-  ANDROID_BUILD_TOOLS: "36.1.0"
-
-  GRADLE_OPTS: "-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8"
-
 jobs:
   build:
-    name: Build Chess Assistant APK
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    name: Build Debug APK
+    runs-on: ubuntu-latest
 
-    defaults:
-      run:
-        shell: bash
+    env:
+      REQUESTED_PROJECT_ZIP: ${{ github.event.inputs.project_zip || 'auto' }}
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
 
-      # ============================================================
-      # 01 - CHECKOUT
-      # ============================================================
-      - name: "01 - Checkout repository"
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 1
-
-      # ============================================================
-      # 02 - JAVA 17
-      # ============================================================
-      - name: "02 - Setup Java 17"
-        uses: actions/setup-java@v6
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: "21"
 
-      # ============================================================
-      # 03 - ANDROID SDK
-      # ============================================================
-      - name: "03 - Setup Android SDK"
+      - name: Set up Android SDK
         uses: android-actions/setup-android@v4
 
-      - name: "04 - Install required Android SDK packages"
+      - name: Install Android SDK packages
+        shell: bash
         run: |
           set -euo pipefail
 
-          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          set +o pipefail
+          yes | sdkmanager --licenses
+          set -o pipefail
 
           sdkmanager \
             "platform-tools" \
-            "platforms;${ANDROID_PLATFORM}" \
-            "build-tools;${ANDROID_BUILD_TOOLS}"
+            "platforms;android-35" \
+            "platforms;android-36" \
+            "platforms;android-36.1" \
+            "build-tools;35.0.0" \
+            "build-tools;36.0.0"
 
-          echo ""
-          echo "Android SDK packages installed."
+      - name: Set up Gradle 9.3.1
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: "9.3.1"
 
-      # ============================================================
-      # 05 - LOCATE NEW PROJECT
-      #
-      # Priority:
-      #   1) smart-chess-move-assistant.zip
-      #   2) already-extracted Gradle project at repository root
-      #
-      # The new project does NOT contain Gradle Wrapper files.
-      # ============================================================
-      - name: "05 - Locate Smart Chess project"
+      - name: Find and prepare Android project
+        shell: bash
         run: |
           set -euo pipefail
 
+          ROOT="$GITHUB_WORKSPACE"
           PROJECT_DIR=""
+          ZIP_FILE=""
 
-          ZIP_FILE="$GITHUB_WORKSPACE/smart-chess-move-assistant.zip"
+          # If a ZIP name was provided manually, use that file.
+          if [[ -n "$REQUESTED_PROJECT_ZIP" && \
+                "$REQUESTED_PROJECT_ZIP" != "auto" ]]; then
 
-          if [ -f "$ZIP_FILE" ]; then
+            case "$REQUESTED_PROJECT_ZIP" in
+              /*|../*|*/../*|*/..)
+                echo "ERROR: Use a path inside the repository."
+                exit 1
+                ;;
+            esac
 
-            echo "Found project ZIP:"
-            ls -lh "$ZIP_FILE"
+            ZIP_FILE="$ROOT/$REQUESTED_PROJECT_ZIP"
 
-            EXTRACT_ROOT="$GITHUB_WORKSPACE/android-project"
-
-            rm -rf "$EXTRACT_ROOT"
-            mkdir -p "$EXTRACT_ROOT"
-
-            unzip -q \
-              "$ZIP_FILE" \
-              -d "$EXTRACT_ROOT"
-
-            SETTINGS_FILE="$({
-              find "$EXTRACT_ROOT" \
-                -type f \
-                \( \
-                  -name 'settings.gradle.kts' \
-                  -o -name 'settings.gradle' \
-                \) \
-                -print \
-                -quit \
-                2>/dev/null || true
-            })"
-
-            if [ -z "$SETTINGS_FILE" ]; then
-
-              echo "::error::settings.gradle(.kts) was not found inside smart-chess-move-assistant.zip"
-
-              echo ""
-              echo "Extracted files:"
-
-              find "$EXTRACT_ROOT" \
-                -maxdepth 10 \
-                -type f \
-                -print \
-                | sort \
-                || true
-
+            if [[ ! -f "$ZIP_FILE" ]]; then
+              echo "ERROR: ZIP file not found: $REQUESTED_PROJECT_ZIP"
+              echo "Available ZIP files:"
+              find "$ROOT" -maxdepth 3 \
+                -type f -iname '*.zip' -print || true
               exit 1
-
             fi
 
-            PROJECT_DIR="$(dirname "$(realpath "$SETTINGS_FILE")")"
+          # Otherwise use Gradle project files already at the root.
+          elif [[ -f "$ROOT/settings.gradle.kts" || \
+                  -f "$ROOT/settings.gradle" ]]; then
 
-          elif [ -f "$GITHUB_WORKSPACE/settings.gradle.kts" ] || \
-               [ -f "$GITHUB_WORKSPACE/settings.gradle" ]; then
-
-            echo "Gradle project is already at repository root."
-
-            PROJECT_DIR="$GITHUB_WORKSPACE"
+            PROJECT_DIR="$ROOT"
 
           else
-
-            echo "::error::Neither smart-chess-move-assistant.zip nor a root Gradle project was found."
-
-            echo ""
-            echo "Repository contents:"
-
-            find "$GITHUB_WORKSPACE" \
-              -maxdepth 6 \
-              -type f \
-              -print \
-              | sort \
-              || true
-
-            exit 1
-
+            # Prefer the Substack project if it has been uploaded.
+            if [[ -f "$ROOT/substack-downloader.zip" ]]; then
+              ZIP_FILE="$ROOT/substack-downloader.zip"
+            else
+              # Find the first ZIP containing a Gradle settings file.
+              while IFS= read -r -d '' candidate; do
+                if unzip -Z1 "$candidate" 2>/dev/null | \
+                   grep -E \
+                   '(^|/)settings\.gradle(\.kts)?$' \
+                   >/dev/null; then
+                  ZIP_FILE="$candidate"
+                  break
+                fi
+              done < <(
+                find "$ROOT" -maxdepth 3 \
+                  -type f -iname '*.zip' \
+                  -not -path '*/.git/*' -print0 | sort -z
+              )
+            fi
           fi
 
-          if [ ! -f "$PROJECT_DIR/build.gradle.kts" ] && \
-             [ ! -f "$PROJECT_DIR/build.gradle" ]; then
+          # Extract the selected project archive.
+          if [[ -n "$ZIP_FILE" ]]; then
 
-            echo "::error::Root Gradle build file not found:"
-            echo "$PROJECT_DIR"
+            if ! unzip -Z1 "$ZIP_FILE" 2>/dev/null | \
+                 grep -E \
+                 '(^|/)settings\.gradle(\.kts)?$' \
+                 >/dev/null; then
+              echo "ERROR: The selected ZIP is not a Gradle project:"
+              echo "$ZIP_FILE"
+              exit 1
+            fi
 
-            exit 1
+            EXTRACT_DIR="$RUNNER_TEMP/android-source"
 
+            rm -rf "$EXTRACT_DIR"
+            mkdir -p "$EXTRACT_DIR"
+
+            unzip -q "$ZIP_FILE" -d "$EXTRACT_DIR"
+
+            SETTINGS_FILE="$(
+              find "$EXTRACT_DIR" -type f \
+                \( -name settings.gradle \
+                   -o -name settings.gradle.kts \) \
+                -not -path '*/.gradle/*' \
+                -print -quit
+            )"
+
+            if [[ -z "$SETTINGS_FILE" ]]; then
+              echo "ERROR: Gradle settings file not found."
+              find "$EXTRACT_DIR" -maxdepth 5 \
+                -type f -print | head -200
+              exit 1
+            fi
+
+            PROJECT_DIR="$(dirname "$SETTINGS_FILE")"
+
+            echo "Selected ZIP: $ZIP_FILE"
           fi
 
-          if [ ! -f "$PROJECT_DIR/app/build.gradle.kts" ] && \
-             [ ! -f "$PROJECT_DIR/app/build.gradle" ]; then
-
-            echo "::error::app Gradle module not found:"
-            echo "$PROJECT_DIR/app"
-
+          # Stop if no valid project was found.
+          if [[ -z "$PROJECT_DIR" ]]; then
+            echo "ERROR: Android Gradle project not found."
+            echo "Add project source files or upload a ZIP containing"
+            echo "settings.gradle or settings.gradle.kts."
+            find "$ROOT" -maxdepth 3 \
+              \( -name '*.zip' \
+                 -o -name settings.gradle \
+                 -o -name settings.gradle.kts \) \
+              -print || true
             exit 1
-
-          fi
-
-          if [ ! -f "$PROJECT_DIR/app/src/main/AndroidManifest.xml" ]; then
-
-            echo "::error::AndroidManifest.xml not found."
-
-            exit 1
-
           fi
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo ""
-          echo "Project root:"
+          echo "Selected project directory:"
           echo "$PROJECT_DIR"
 
-      # ============================================================
-      # 06 - INSPECT PROJECT
-      # ============================================================
-      - name: "06 - Inspect project"
+          ls -la "$PROJECT_DIR"
+
+      - name: Build Debug APK
+        id: build_apk
+        shell: bash
         run: |
           set -euo pipefail
 
           cd "$PROJECT_DIR"
 
-          echo "============================================================"
-          echo "PROJECT STRUCTURE"
-          echo "============================================================"
-
-          find . \
-            -maxdepth 5 \
-            -type f \
-            \( \
-              -name 'settings.gradle.kts' \
-              -o -name 'settings.gradle' \
-              -o -name 'build.gradle.kts' \
-              -o -name 'build.gradle' \
-              -o -name 'gradle.properties' \
-              -o -name 'libs.versions.toml' \
-              -o -name 'AndroidManifest.xml' \
-            \) \
-            -print \
-            | sort
-
-          echo ""
-          echo "============================================================"
-          echo "APP BUILD FILE"
-          echo "============================================================"
-
-          cat app/build.gradle.kts
-
-          echo ""
-          echo "============================================================"
-          echo "VERSION CATALOG"
-          echo "============================================================"
-
-          cat gradle/libs.versions.toml
-
-      # ============================================================
-      # 07 - CONFIGURE LOCAL SDK
-      # ============================================================
-      - name: "07 - Configure local.properties"
-        run: |
-          set -euo pipefail
-
-          cd "$PROJECT_DIR"
-
-          SDK_DIR="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
-
-          if [ -z "$SDK_DIR" ] || [ ! -d "$SDK_DIR" ]; then
-
-            echo "::error::ANDROID_HOME / ANDROID_SDK_ROOT is not configured correctly."
-
-            exit 1
-
-          fi
-
-          printf 'sdk.dir=%s\n' "$SDK_DIR" > local.properties
-
-          echo "local.properties:"
-          cat local.properties
-
-      # ============================================================
-      # 08 - PREPARE ENVIRONMENT / GEMINI
-      #
-      # Optional GitHub Secret:
-      # GEMINI_API_KEY
-      #
-      # The app already contains a local fallback when no key exists.
-      # ============================================================
-      - name: "08 - Prepare .env"
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: |
-          set -euo pipefail
-
-          cd "$PROJECT_DIR"
-
-          if [ -n "${GEMINI_API_KEY:-}" ]; then
-
-            printf 'GEMINI_API_KEY=%s\n' "$GEMINI_API_KEY" > .env
-
-            echo "GEMINI_API_KEY secret detected."
-
-          elif [ -f ".env.example" ]; then
-
-            cp ".env.example" ".env"
-
-            echo "No GEMINI_API_KEY secret was provided."
-            echo "Using .env.example placeholder."
-
+          # Use the project's wrapper if available.
+          # Otherwise use Gradle 9.3.1 installed above.
+          if [[ -f "./gradlew" ]]; then
+            chmod +x ./gradlew
+            GRADLE_CMD="./gradlew"
           else
-
-            printf 'GEMINI_API_KEY=MY_GEMINI_API_KEY\n' > .env
-
-            echo "No .env.example found."
-            echo "Using placeholder key."
-
+            GRADLE_CMD="gradle"
           fi
 
-          chmod 600 .env
+          # The provided Substack project uses the app module.
+          if [[ -f "app/build.gradle.kts" || \
+                -f "app/build.gradle" ]]; then
+            BUILD_TASK=":app:assembleDebug"
+          else
+            BUILD_TASK="assembleDebug"
+          fi
 
-      # ============================================================
-      # 09 - CI GRADLE SETTINGS
-      # ============================================================
-      - name: "09 - Configure CI Gradle settings"
-        run: |
-          set -euo pipefail
+          echo "Gradle version:"
+          "$GRADLE_CMD" --version
 
-          cd "$PROJECT_DIR"
+          echo "Building APK..."
+          "$GRADLE_CMD" --no-daemon \
+            "$BUILD_TASK" --stacktrace
 
-          touch gradle.properties
+          # Locate the generated Debug APK.
+          APK_PATH="$(
+            find "$PROJECT_DIR" -type f \
+              -path '*/build/outputs/apk/debug/*.apk' \
+              -print -quit
+          )"
 
-          set_property() {
-
-            local KEY="$1"
-            local VALUE="$2"
-
-            if grep -q "^${KEY}=" gradle.properties; then
-
-              sed -i \
-                "s#^${KEY}=.*#${KEY}=${VALUE}#" \
-                gradle.properties
-
-            else
-
-              printf '%s=%s\n' \
-                "$KEY" \
-                "$VALUE" \
-                >> gradle.properties
-
-            fi
-          }
-
-          set_property \
-            "org.gradle.jvmargs" \
-            "$GRADLE_OPTS"
-
-          set_property \
-            "org.gradle.configuration-cache" \
-            "false"
-
-          set_property \
-            "org.gradle.caching" \
-            "false"
-
-          set_property \
-            "org.gradle.workers.max" \
-            "4"
-
-          set_property \
-            "kotlin.compiler.execution.strategy" \
-            "in-process"
-
-          echo ""
-          echo "Final CI Gradle properties:"
-
-          grep -E \
-            '^(org\.gradle\.jvmargs|org\.gradle\.configuration-cache|org\.gradle\.caching|org\.gradle\.workers.max|kotlin.compiler.execution.strategy)=' \
-            gradle.properties \
-            || true
-
-      # ============================================================
-      # 10 - KSP CI COMPATIBILITY
-      # ============================================================
-      - name: "10 - Set KSP 2.3.6 for CI"
-        run: |
-          set -euo pipefail
-
-          cd "$PROJECT_DIR"
-
-          VERSION_FILE="gradle/libs.versions.toml"
-
-          if [ ! -f "$VERSION_FILE" ]; then
-
-            echo "::error::gradle/libs.versions.toml not found."
-
+          if [[ -z "$APK_PATH" ]]; then
+            echo "ERROR: No Debug APK was generated."
+            find "$PROJECT_DIR" -type f \
+              -path '*/build/outputs/*' -print || true
             exit 1
-
           fi
 
-          echo "Original KSP entry:"
+          echo "apk_path=$APK_PATH" >> "$GITHUB_OUTPUT"
 
-          grep -n \
-            'googleDevtoolsKsp' \
-            "$VERSION_FILE" \
-            || true
+          echo "APK created successfully:"
+          echo "$APK_PATH"
 
-          if grep -q \
-            'googleDevtoolsKsp = "2\.3\.5"' \
-            "$VERSION_FILE"
-          then
-
-            cp \
-              "$VERSION_FILE" \
-              "$GITHUB_WORKSPACE/libs.versions.toml.original"
-
-            sed -i \
-              's/googleDevtoolsKsp = "2\.3\.5"/googleDevtoolsKsp = "2.3.6"/' \
-              "$VERSION_FILE"
-
-            echo ""
-            echo "KSP 2.3.5 detected."
-            echo "Using KSP 2.3.6 in CI."
-
-          fi
-
-          echo ""
-          echo "Final KSP entry:"
-
-          grep -n \
-            'googleDevtoolsKsp' \
-            "$VERSION_FILE"
-
-      # ============================================================
-      # 11 - DEBUG KEYSTORE
-      # ============================================================
-      - name: "11 - Create debug keystore"
-        run: |
-          set -euo pipefail
-
-          cd "$PROJECT_DIR"
-
-          KEYSTORE="$PROJECT_DIR/debug.keystore"
-
-          if [ ! -f "$KEYSTORE" ]; then
-
-            echo "Creating debug.keystore..."
-
-            keytool \
-              -genkeypair \
-              -v \
-              -keystore "$KEYSTORE" \
-              -storepass android \
-              -keypass android \
-              -alias androiddebugkey \
-              -keyalg RSA \
-              -keysize 2048 \
-              -validity 10000 \
-              -dname "CN=Android Debug,O=Android,C=US"
-
-          fi
-
-          test -f "$KEYSTORE"
-
-          keytool \
-            -list \
-            -keystore "$KEYSTORE" \
-            -storepass android \
-            -alias androiddebugkey \
-            >/dev/null
-
-          echo "debug.keystore verified."
-
-      # ============================================================
-      # 12 - SETUP GRADLE
-      #
-      # The project has no Gradle Wrapper, so Gradle is installed
-      # explicitly through setup-gradle.
-      # ============================================================
-      - name: "12 - Setup Gradle 9.3.1"
-        uses: gradle/actions/setup-gradle@v6
-        with:
-          gradle-version: "9.3.1"
-          cache-disabled: true
-          add-job-summary: on-failure
-
-      # ============================================================
-      # 13 - VERIFY TOOLCHAIN
-      # ============================================================
-      - name: "13 - Verify Java / Gradle / Android"
-        run: |
-          set -euo pipefail
-
-          echo "============================================================"
-          echo "JAVA"
-          echo "============================================================"
-
-          java -version
-
-          echo "JAVA_HOME=$JAVA_HOME"
-
-          echo ""
-          echo "============================================================"
-          echo "GRADLE"
-          echo "============================================================"
-
-          gradle --version
-
-          echo ""
-          echo "============================================================"
-          echo "ANDROID SDK"
-          echo "============================================================"
-
-          echo "ANDROID_HOME=${ANDROID_HOME:-unknown}"
-          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-unknown}"
-
-          SDK_DIR="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
-
-          test -f \
-            "$SDK_DIR/platforms/$ANDROID_PLATFORM/android.jar"
-
-          test -f \
-            "$SDK_DIR/build-tools/$ANDROID_BUILD_TOOLS/aapt2"
-
-          test -f \
-            "$SDK_DIR/platform-tools/adb"
-
-          echo ""
-          echo "Android platform:"
-          echo "$ANDROID_PLATFORM OK"
-
-          echo ""
-          echo "Build tools:"
-          echo "$ANDROID_BUILD_TOOLS OK"
-
-          echo ""
-          echo "Platform tools:"
-          echo "OK"
-
-      # ============================================================
-      # 14 - VALIDATE GRADLE CONFIGURATION
-      # ============================================================
-      - name: "14 - Validate Gradle configuration"
-        run: |
-          set -uo pipefail
-
-          cd "$PROJECT_DIR"
-
-          LOG="$GITHUB_WORKSPACE/gradle-help.log"
-
-          rm -f "$LOG"
-
-          echo "============================================================"
-          echo "GRADLE CONFIGURATION"
-          echo "============================================================"
-
-          set +e
-
-          gradle \
-            help \
-            --no-daemon \
-            --no-configuration-cache \
-            --no-build-cache \
-            --stacktrace \
-            --console=plain \
-            --warning-mode=all \
-            2>&1 \
-            | tee "$LOG"
-
-          RC=${PIPESTATUS[0]}
-
-          set -e
-
-          if [ "$RC" -ne 0 ]; then
-
-            echo ""
-            echo "============================================================"
-            echo "GRADLE CONFIGURATION FAILED"
-            echo "============================================================"
-
-            echo ""
-            echo "Relevant errors:"
-
-            grep -n -E \
-              'FAILURE:|Exception|Caused by:|error:|ERROR|KSP|Kotlin|Plugin|AGP|Gradle|Room|Moshi|google-services|secrets' \
-              "$LOG" \
-              | tail -n 350 \
-              || true
-
-            echo ""
-            echo "Last 500 lines:"
-
-            tail -n 500 "$LOG"
-
-            exit "$RC"
-
-          fi
-
-          echo ""
-          echo "Gradle configuration OK."
-
-      # ============================================================
-      # 15 - BUILD DEBUG APK
-      # ============================================================
-      - name: "15 - Build Debug APK"
-        run: |
-          set -uo pipefail
-
-          cd "$PROJECT_DIR"
-
-          LOG="$GITHUB_WORKSPACE/gradle-build.log"
-
-          rm -f "$LOG"
-
-          echo "============================================================"
-          echo "BUILDING CHESS ASSISTANT DEBUG APK"
-          echo "============================================================"
-
-          set +e
-
-          gradle \
-            :app:assembleDebug \
-            --no-daemon \
-            --no-configuration-cache \
-            --no-build-cache \
-            --rerun-tasks \
-            --stacktrace \
-            --console=plain \
-            --warning-mode=all \
-            2>&1 \
-            | tee "$LOG"
-
-          RC=${PIPESTATUS[0]}
-
-          set -e
-
-          if [ "$RC" -ne 0 ]; then
-
-            echo ""
-            echo "============================================================"
-            echo "APK BUILD FAILED"
-            echo "============================================================"
-
-            echo ""
-            echo "KSP:"
-
-            grep -n -E \
-              'KSP|ksp|symbol-processing|ApplicationManager' \
-              "$LOG" \
-              | tail -n 250 \
-              || true
-
-            echo ""
-            echo "Android SDK / AAPT:"
-
-            grep -n -E \
-              'compileSdk|36\.1|android\.jar|AAPT|aapt2|resource .* not found|Manifest merger|SDK' \
-              "$LOG" \
-              | tail -n 250 \
-              || true
-
-            echo ""
-            echo "Kotlin / Java:"
-
-            grep -n -E \
-              'Kotlin|KotlinCompile|jvmTarget|JVM target|Unsupported class file|Inconsistent JVM|Java|OutOfMemory|Metaspace' \
-              "$LOG" \
-              | tail -n 250 \
-              || true
-
-            echo ""
-            echo "Dependencies / Network:"
-
-            grep -n -E \
-              'Could not resolve|Could not find|Could not download|TLS|SSL|PKIX|timeout|timed out|Connection reset|Connection refused|UnknownHost' \
-              "$LOG" \
-              | tail -n 250 \
-              || true
-
-            echo ""
-            echo "Google Services / Secrets:"
-
-            grep -n -E \
-              'google-services|googleServices|google-services.json|secrets|GEMINI_API_KEY|MissingGoogleServices' \
-              "$LOG" \
-              | tail -n 200 \
-              || true
-
-            echo ""
-            echo "Gradle:"
-
-            grep -n -E \
-              'FAILURE:|Execution failed for task|Task .* FAILED|Exception|Caused by:|error:' \
-              "$LOG" \
-              | tail -n 400 \
-              || true
-
-            echo ""
-            echo "LAST 600 LINES:"
-
-            tail -n 600 "$LOG"
-
-            exit "$RC"
-
-          fi
-
-          echo ""
-          echo "============================================================"
-          echo "APK BUILD SUCCESSFUL"
-          echo "============================================================"
-
-      # ============================================================
-      # 16 - VERIFY GENERATED APK
-      # ============================================================
-      - name: "16 - Verify generated APK"
-        if: success()
-        run: |
-          set -euo pipefail
-
-          APK="$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
-
-          if [ ! -f "$APK" ]; then
-
-            echo "::error::app-debug.apk was not generated."
-
-            echo ""
-            echo "All APK files:"
-
-            find "$PROJECT_DIR" \
-              -type f \
-              -name '*.apk' \
-              -print \
-              | sort \
-              || true
-
-            exit 1
-
-          fi
-
-          echo "APK exists:"
-
-          ls -lh "$APK"
-
-      # ============================================================
-      # 17 - PREPARE APK ARTIFACT
-      # ============================================================
-      - name: "17 - Prepare APK artifact"
-        if: success()
-        run: |
-          set -euo pipefail
-
-          OUTPUT="$GITHUB_WORKSPACE/apk-output"
-
-          rm -rf "$OUTPUT"
-
-          mkdir -p "$OUTPUT"
-
-          cp \
-            "$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk" \
-            "$OUTPUT/ChessAssistant-debug.apk"
-
-          echo ""
-          echo "Final artifact:"
-
-          ls -lh \
-            "$OUTPUT/ChessAssistant-debug.apk"
-
-      # ============================================================
-      # 18 - INSPECT APK
-      # ============================================================
-      - name: "18 - Inspect APK"
-        if: success()
-        run: |
-          set -euo pipefail
-
-          APK="$GITHUB_WORKSPACE/apk-output/ChessAssistant-debug.apk"
-
-          echo "============================================================"
-          echo "APK INFORMATION"
-          echo "============================================================"
-
-          echo ""
-          echo "File:"
-
-          file "$APK"
-
-          echo ""
-          echo "Size:"
-
-          ls -lh "$APK"
-
-          echo ""
-          echo "SHA256:"
-
-          sha256sum "$APK"
-
-          echo ""
-          echo "APK summary:"
-
-          apkanalyzer apk summary "$APK" || true
-
-      # ============================================================
-      # 19 - UPLOAD APK
-      # ============================================================
-      - name: "19 - Upload Chess Assistant APK"
-        if: success()
+      - name: Upload APK
         uses: actions/upload-artifact@v7
         with:
-          name: ChessAssistant-APK
-          path: apk-output/ChessAssistant-debug.apk
+          name: Android-Debug-APK
+          path: ${{ steps.build_apk.outputs.apk_path }}
+          archive: false
           if-no-files-found: error
-          retention-days: 30
-          compression-level: 0
-
-      # ============================================================
-      # 20 - COLLECT DIAGNOSTICS
-      # ============================================================
-      - name: "20 - Collect diagnostics"
-        if: always()
-        run: |
-          set +e
-
-          DIAG="$GITHUB_WORKSPACE/diagnostics"
-
-          rm -rf "$DIAG"
-
-          mkdir -p "$DIAG"
-
-          copy_if_exists() {
-
-            local SRC="$1"
-            local DST="$2"
-
-            if [ -f "$SRC" ]; then
-
-              cp "$SRC" "$DST" || true
-
-            fi
-          }
-
-          copy_if_exists \
-            "$GITHUB_WORKSPACE/gradle-help.log" \
-            "$DIAG/gradle-help.log"
-
-          copy_if_exists \
-            "$GITHUB_WORKSPACE/gradle-build.log" \
-            "$DIAG/gradle-build.log"
-
-          copy_if_exists \
-            "$GITHUB_WORKSPACE/libs.versions.toml.original" \
-            "$DIAG/libs.versions.toml.original"
-
-          if [ -n "${PROJECT_DIR:-}" ] && \
-             [ -d "$PROJECT_DIR" ]; then
-
-            copy_if_exists \
-              "$PROJECT_DIR/settings.gradle.kts" \
-              "$DIAG/settings.gradle.kts"
-
-            copy_if_exists \
-              "$PROJECT_DIR/build.gradle.kts" \
-              "$DIAG/root-build.gradle.kts"
-
-            copy_if_exists \
-              "$PROJECT_DIR/app/build.gradle.kts" \
-              "$DIAG/app-build.gradle.kts"
-
-            copy_if_exists \
-              "$PROJECT_DIR/gradle/libs.versions.toml" \
-              "$DIAG/libs.versions.toml"
-
-            copy_if_exists \
-              "$PROJECT_DIR/gradle.properties" \
-              "$DIAG/gradle.properties"
-
-            copy_if_exists \
-              "$PROJECT_DIR/local.properties" \
-              "$DIAG/local.properties"
-
-            find "$PROJECT_DIR" \
-              -maxdepth 10 \
-              -type f \
-              -print \
-              | sort \
-              > "$DIAG/project-tree.txt" \
-              || true
-
-          fi
-
-          {
-            echo "============================================================"
-            echo "ENVIRONMENT"
-            echo "============================================================"
-
-            echo ""
-            echo "Runner:"
-
-            cat /etc/os-release || true
-
-            echo ""
-            echo "Java:"
-
-            java -version 2>&1 || true
-
-            echo ""
-            echo "JAVA_HOME:"
-
-            echo "${JAVA_HOME:-unknown}"
-
-            echo ""
-            echo "Gradle:"
-
-            gradle --version 2>&1 || true
-
-            echo ""
-            echo "ANDROID_HOME:"
-
-            echo "${ANDROID_HOME:-unknown}"
-
-            echo ""
-            echo "ANDROID_SDK_ROOT:"
-
-            echo "${ANDROID_SDK_ROOT:-unknown}"
-
-            echo ""
-            echo "Android Platform:"
-
-            ls -ld \
-              "${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}/platforms/${ANDROID_PLATFORM}" \
-              2>&1 \
-              || true
-
-            echo ""
-            echo "Build Tools:"
-
-            ls -ld \
-              "${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}/build-tools/${ANDROID_BUILD_TOOLS}" \
-              2>&1 \
-              || true
-
-          } > "$DIAG/environment.txt"
-
-          echo "Diagnostics collected."
-
-      # ============================================================
-      # 21 - UPLOAD DIAGNOSTICS
-      # ============================================================
-      - name: "21 - Upload diagnostics"
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: ChessAssistant-Diagnostics
-          path: diagnostics/
-          if-no-files-found: warn
-          retention-days: 14
-          compression-level: 6
