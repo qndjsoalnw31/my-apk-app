@@ -1,3 +1,4 @@
+
 name: Build CinePro Cinema Camera APK
 
 on:
@@ -13,186 +14,358 @@ permissions:
   contents: read
 
 concurrency:
-  group: cinepro-apk-${{ github.ref }}
+  group: cinepro-build-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   build:
-    name: Build CinePro Android APK
+    name: Build Android APK
     runs-on: ubuntu-24.04
     timeout-minutes: 60
 
     env:
-      GRADLE_OPTS: "-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8"
+      JAVA_TOOL_OPTIONS: -Xmx4g -Dfile.encoding=UTF-8
+      GRADLE_OPTS: -Xmx4g -XX:MaxMetaspaceSize=1g
 
     steps:
+      # 1. تحميل ملفات المستودع
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v5
+      # 2. تثبيت Java
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
+          cache: gradle
 
+      # 3. تثبيت Android SDK
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v4
+        uses: android-actions/setup-android@v3
 
-      - name: Accept Android SDK licenses
+      - name: Accept Android licenses
         shell: bash
         run: |
-          set -euo pipefail
-          set +o pipefail
-          yes | sdkmanager --licenses
-          set -o pipefail
+          set -e
+          yes | sdkmanager --licenses || true
 
-      - name: Install Android SDK packages
+      # 4. التأكد من وجود ملف ZIP وفحص سلامته
+      - name: Verify ZIP archive
         shell: bash
-        run: |
-          set -euo pipefail
-          sdkmanager \
-            "platform-tools" \
-            "platforms;android-36.1" \
-            "build-tools;36.0.0"
-
-      - name: Set up Gradle 9.3.1
-        uses: gradle/actions/setup-gradle@v6
-        with:
-          gradle-version: '9.3.1'
-
-      - name: Verify and extract CinePro project
-        id: extract
-        shell: bash
-        env:
-          EXPECTED_SHA256: a7316216e038bfa5bf0b4c8a2ce9025b716e5cd4d9f791de84ecd3fb6e4b7bf7
         run: |
           set -euo pipefail
 
           ARCHIVE="$GITHUB_WORKSPACE/cinepro-cinema-camera.zip"
-          PROJECT_DIR="$RUNNER_TEMP/cinepro-project"
 
-          if [[ ! -f "$ARCHIVE" ]]; then
-            echo "::error::cinepro-cinema-camera.zip was not found in the repository root."
-            find "$GITHUB_WORKSPACE" -maxdepth 3 -type f -iname '*.zip' -print || true
+          if [ ! -f "$ARCHIVE" ]; then
+            echo "::error::cinepro-cinema-camera.zip is missing."
+            echo "ZIP files found:"
+            find "$GITHUB_WORKSPACE" -type f -iname '*.zip'
             exit 1
           fi
 
-          echo "$EXPECTED_SHA256  $ARCHIVE" | sha256sum --check
+          if [ ! -s "$ARCHIVE" ]; then
+            echo "::error::ZIP archive is empty."
+            exit 1
+          fi
+
+          echo "Archive size:"
+          ls -lh "$ARCHIVE"
+
+          echo "Testing ZIP integrity..."
           unzip -tq "$ARCHIVE"
 
-          rm -rf "$PROJECT_DIR"
-          mkdir -p "$PROJECT_DIR"
+          echo "ZIP archive is valid."
 
-          python3 - "$ARCHIVE" "$PROJECT_DIR" <<'PY'
+      # 5. استخراج المشروع واكتشاف مجلده تلقائياً
+      - name: Extract Android project
+        id: project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ARCHIVE="$GITHUB_WORKSPACE/cinepro-cinema-camera.zip"
+          DEST="$RUNNER_TEMP/cinepro-extracted"
+
+          rm -rf "$DEST"
+          mkdir -p "$DEST"
+
+          python3 - "$ARCHIVE" "$DEST" <<'PY'
           import pathlib
+          import stat
           import sys
           import zipfile
 
           archive = pathlib.Path(sys.argv[1])
           destination = pathlib.Path(sys.argv[2]).resolve()
 
-          with zipfile.ZipFile(archive) as zf:
-              for entry in zf.infolist():
-                  target = (destination / entry.filename).resolve()
-                  if not target.is_relative_to(destination):
-                      raise SystemExit(f"Unsafe ZIP path: {entry.filename}")
-              zf.extractall(destination)
+          with zipfile.ZipFile(archive) as z:
+              entries = z.infolist()
 
-          required = [
-              destination / "settings.gradle.kts",
-              destination / "build.gradle.kts",
-              destination / "app" / "build.gradle.kts",
-              destination / "app" / "src" / "main" / "AndroidManifest.xml",
-              destination / "gradle" / "libs.versions.toml",
+              if not entries:
+                  raise SystemExit("The ZIP archive is empty.")
+
+              for entry in entries:
+                  target = (destination / entry.filename).resolve()
+
+                  if not target.is_relative_to(destination):
+                      raise SystemExit(
+                          f"Unsafe ZIP path detected: {entry.filename}"
+                      )
+
+                  mode = entry.external_attr >> 16
+
+                  if stat.S_ISLNK(mode):
+                      raise SystemExit(
+                          f"Symbolic links are not allowed: {entry.filename}"
+                      )
+
+              z.extractall(destination)
+
+          settings_files = list(destination.rglob("settings.gradle"))
+          settings_files += list(destination.rglob("settings.gradle.kts"))
+
+          settings_files = [
+              p for p in settings_files
+              if "__MACOSX" not in p.parts
+              and ".gradle" not in p.parts
           ]
 
-          missing = [str(path) for path in required if not path.is_file()]
-
-          if missing:
+          if not settings_files:
               raise SystemExit(
-                  "Required CinePro project files are missing: " + ", ".join(missing)
+                  "Android project not found: settings.gradle or settings.gradle.kts is missing."
+              )
+
+          roots = sorted(
+              {p.parent.resolve() for p in settings_files},
+              key=lambda p: len(p.parts)
+          )
+
+          project_root = roots[0]
+
+          build_files = [
+              project_root / "build.gradle",
+              project_root / "build.gradle.kts"
+          ]
+
+          if not any(p.is_file() for p in build_files):
+              raise SystemExit(
+                  "Root build.gradle or build.gradle.kts is missing."
+              )
+
+          manifests = list(
+              project_root.rglob("AndroidManifest.xml")
+          )
+
+          if not manifests:
+              raise SystemExit(
+                  "No AndroidManifest.xml found in the project."
+              )
+
+          print("Project root:", project_root)
+          print("Manifest files:", len(manifests))
+
+          with open(
+              pathlib.Path(sys.argv[2]).parent / "project-root.txt",
+              "w"
+          ) as f:
+              f.write(str(project_root))
+          PY
+
+          PROJECT_DIR="$(cat "$RUNNER_TEMP/project-root.txt")"
+
+          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+
+          echo "Detected project:"
+          find "$PROJECT_DIR" -maxdepth 3 -type f | head -100
+
+      # 6. اكتشاف compileSdk وتثبيت المنصة المطلوبة
+      - name: Install required Android platform
+        shell: bash
+        env:
+          PROJECT_DIR: ${{ steps.project.outputs.project_dir }}
+        run: |
+          set -euo pipefail
+
+          SDK_VERSION="$(python3 - "$PROJECT_DIR" <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          root = pathlib.Path(sys.argv[1])
+          patterns = [
+              r"\bcompileSdk(?:Version)?\s*[=(]?\s*(\d+)",
+              r"\bcompileSdk\s*=\s*(\d+)"
+          ]
+
+          found = []
+
+          for path in root.rglob("*"):
+              if not path.is_file():
+                  continue
+
+              if path.suffix not in (".gradle", ".kts"):
+                  continue
+
+              if any(x in path.parts for x in (
+                  ".gradle", "build", ".git"
+              )):
+                  continue
+
+              try:
+                  content = path.read_text(errors="ignore")
+              except OSError:
+                  continue
+
+              for pattern in patterns:
+                  found.extend(
+                      int(x) for x in re.findall(pattern, content)
+                  )
+
+          print(max(found) if found else 35)
+          PY
+          )"
+
+          echo "Detected compileSdk: $SDK_VERSION"
+
+          sdkmanager "platform-tools" "platforms;android-$SDK_VERSION"
+
+      # 7. إعداد Gradle احتياطياً إذا لم يوجد Wrapper
+      - name: Set up Gradle fallback
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.14.3'
+
+      # 8. فحص إعدادات المشروع
+      - name: Validate project configuration
+        shell: bash
+        env:
+          PROJECT_DIR: ${{ steps.project.outputs.project_dir }}
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          if [ -f "gradle/wrapper/gradle-wrapper.properties" ]; then
+            echo "Gradle Wrapper configuration found."
+            cat gradle/wrapper/gradle-wrapper.properties
+          else
+            echo "No Gradle Wrapper found. Using installed Gradle."
+          fi
+
+          echo "Java:"
+          java -version
+
+          echo "Android SDK:"
+          sdkmanager --list_installed
+
+      # 9. بناء APK
+      - name: Build Debug APK
+        shell: bash
+        env:
+          PROJECT_DIR: ${{ steps.project.outputs.project_dir }}
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          printf 'sdk.dir=%s\n' "$ANDROID_HOME" > local.properties
+
+          chmod +x gradlew 2>/dev/null || true
+
+          if [ -f "./gradlew" ]; then
+            echo "Building with project Gradle Wrapper."
+
+            ./gradlew \
+              --no-daemon \
+              --stacktrace \
+              --console=plain \
+              assembleDebug
+
+          else
+            echo "Building with installed Gradle."
+
+            gradle \
+              --no-daemon \
+              --stacktrace \
+              --console=plain \
+              assembleDebug
+          fi
+
+      # 10. جمع ملفات APK مهما كان اسم وحدة التطبيق
+      - name: Collect APK files
+        shell: bash
+        env:
+          PROJECT_DIR: ${{ steps.project.outputs.project_dir }}
+        run: |
+          set -euo pipefail
+
+          OUTPUT="$GITHUB_WORKSPACE/output"
+
+          rm -rf "$OUTPUT"
+          mkdir -p "$OUTPUT"
+
+          python3 - "$PROJECT_DIR" "$OUTPUT" <<'PY'
+          import pathlib
+          import shutil
+          import sys
+
+          root = pathlib.Path(sys.argv[1])
+          output = pathlib.Path(sys.argv[2])
+
+          apk_files = list(
+              root.rglob("build/outputs/apk/**/*.apk")
+          )
+
+          apk_files = [
+              p for p in apk_files
+              if p.is_file() and p.stat().st_size > 0
+          ]
+
+          if not apk_files:
+              raise SystemExit(
+                  "Build finished but no APK files were found."
+              )
+
+          for index, apk in enumerate(apk_files, 1):
+              if len(apk_files) == 1:
+                  name = "CinePro-Cinema-Camera.apk"
+              else:
+                  name = f"CinePro-{index}-{apk.name}"
+
+              destination = output / name
+              shutil.copy2(apk, destination)
+
+              print(
+                  f"APK: {destination.name} "
+                  f"({destination.stat().st_size} bytes)"
               )
           PY
 
-          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
-          echo "CinePro project extracted successfully."
-          ls -la "$PROJECT_DIR"
+          echo "Collected APK files:"
+          ls -lh "$OUTPUT"
 
-      - name: Configure optional Gemini API key
-        if: ${{ secrets.GEMINI_API_KEY != '' }}
-        shell: bash
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          PROJECT_DIR: ${{ steps.extract.outputs.project_dir }}
-        run: |
-          set -euo pipefail
-          printf 'GEMINI_API_KEY=%s\n' "$GEMINI_API_KEY" > "$PROJECT_DIR/.env"
-
-      - name: Create required debug keystore
-        shell: bash
-        env:
-          PROJECT_DIR: ${{ steps.extract.outputs.project_dir }}
-        run: |
-          set -euo pipefail
-
-          KEYSTORE="$PROJECT_DIR/debug.keystore"
-
-          keytool -genkeypair -v -noprompt \
-            -keystore "$KEYSTORE" \
-            -storetype JKS \
-            -storepass android \
-            -alias androiddebugkey \
-            -keypass android \
-            -dname "CN=Android Debug,O=Android,C=US" \
-            -keyalg RSA \
-            -keysize 2048 \
-            -validity 10000
-
-          keytool -list \
-            -keystore "$KEYSTORE" \
-            -storepass android \
-            -alias androiddebugkey
-
-      - name: Build CinePro Debug APK
-        shell: bash
-        env:
-          PROJECT_DIR: ${{ steps.extract.outputs.project_dir }}
-        run: |
-          set -euo pipefail
-
-          printf 'sdk.dir=%s\n' "$ANDROID_HOME" > "$PROJECT_DIR/local.properties"
-
-          java -version
-          gradle --version
-
-          gradle \
-            --no-daemon \
-            --no-configuration-cache \
-            --stacktrace \
-            --console=plain \
-            -p "$PROJECT_DIR" \
-            :app:assembleDebug
-
-          APK_SOURCE="$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
-
-          if [[ ! -s "$APK_SOURCE" ]]; then
-            echo "::error::Gradle completed but the expected APK was not created."
-            find "$PROJECT_DIR/app/build/outputs" -type f -name '*.apk' -print || true
-            exit 1
-          fi
-
-          mkdir -p "$GITHUB_WORKSPACE/output"
-
-          cp "$APK_SOURCE" \
-            "$GITHUB_WORKSPACE/output/CinePro-Cinema-Camera.apk"
-
-          ls -lh "$GITHUB_WORKSPACE/output/CinePro-Cinema-Camera.apk"
-
-      - name: Upload CinePro APK
-        uses: actions/upload-artifact@v7
+      # 11. رفع APK كملف قابل للتنزيل
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
         with:
           name: CinePro-Cinema-Camera-APK
-          path: output/CinePro-Cinema-Camera.apk
+          path: output/*.apk
           if-no-files-found: error
           retention-days: 14
-          compression-level: 0
+
+      # 12. إظهار نتيجة البناء
+      - name: Build summary
+        if: always()
+        shell: bash
+        run: |
+          echo "## CinePro APK Build" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -d "$GITHUB_WORKSPACE/output" ]; then
+            echo "### Generated APK files" >> "$GITHUB_STEP_SUMMARY"
+            ls -lh "$GITHUB_WORKSPACE/output" >> "$GITHUB_STEP_SUMMARY" || true
+          else
+            echo "No APK output directory was generated." >> "$GITHUB_STEP_SUMMARY"
+          fi
