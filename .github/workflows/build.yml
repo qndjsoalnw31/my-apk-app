@@ -29,18 +29,15 @@ jobs:
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
 
     steps:
-      # 1. Checkout
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. Java 17
-      - name: Setup Java
+      - name: Setup Java 17
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
 
-      # 3. Android SDK
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
         with:
@@ -48,7 +45,6 @@ jobs:
           accept-android-sdk-licenses: true
           log-accepted-android-sdk-licenses: false
 
-      # 4. Verify Android SDK
       - name: Verify Android SDK
         shell: bash
         run: |
@@ -66,13 +62,8 @@ jobs:
 
           echo "ANDROID_SDK_MANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
 
-          "$SDKMANAGER" \
-            --sdk_root="$ANDROID_HOME" \
-            --list_installed
+          "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --list_installed
 
-          echo "Android SDK verified."
-
-      # 5. Verify ZIP
       - name: Verify project ZIP
         shell: bash
         run: |
@@ -80,22 +71,14 @@ jobs:
 
           ZIP="$GITHUB_WORKSPACE/cinepro-cinema-camera.zip"
 
-          if [ ! -f "$ZIP" ]; then
-            echo "::error::Project ZIP not found."
-            exit 1
-          fi
-
           if [ ! -s "$ZIP" ]; then
-            echo "::error::Project ZIP is empty."
+            echo "::error::cinepro-cinema-camera.zip is missing or empty."
             exit 1
           fi
 
           unzip -tq "$ZIP"
-
-          echo "Project archive is valid."
           ls -lh "$ZIP"
 
-      # 6. Extract project safely
       - name: Extract and detect Android project
         id: project
         shell: bash
@@ -127,16 +110,12 @@ jobs:
                   target = (destination / entry.filename).resolve()
 
                   if not target.is_relative_to(destination):
-                      raise SystemExit(
-                          "Unsafe ZIP path: " + entry.filename
-                      )
+                      raise SystemExit("Unsafe ZIP path: " + entry.filename)
 
                   mode = entry.external_attr >> 16
 
                   if stat.S_ISLNK(mode):
-                      raise SystemExit(
-                          "Symbolic link found: " + entry.filename
-                      )
+                      raise SystemExit("Symbolic link found: " + entry.filename)
 
               z.extractall(destination)
 
@@ -153,9 +132,7 @@ jobs:
           ]
 
           if not settings:
-              raise SystemExit(
-                  "Gradle settings file was not found."
-              )
+              raise SystemExit("Gradle settings file was not found.")
 
           roots = sorted(
               {p.parent.resolve() for p in settings},
@@ -168,30 +145,22 @@ jobs:
               (root / name).is_file()
               for name in ("build.gradle", "build.gradle.kts")
           ):
-              raise SystemExit(
-                  "Root Gradle build file is missing."
-              )
+              raise SystemExit("Root Gradle build file is missing.")
 
           if not list(root.rglob("AndroidManifest.xml")):
-              raise SystemExit(
-                  "AndroidManifest.xml was not found."
-              )
+              raise SystemExit("AndroidManifest.xml was not found.")
 
           marker = destination.parent / "project-root.txt"
           marker.write_text(str(root))
 
           print("Project root:", root)
-          print("Project validation completed.")
           PY
 
           PROJECT_DIR="$(cat "$GITHUB_WORKSPACE/.build/project-root.txt")"
-
           echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
 
-          echo "Project files:"
           find "$PROJECT_DIR" -maxdepth 3 -type f | head -100
 
-      # 7. Detect compileSdk
       - name: Detect Android SDK version
         id: sdk
         shell: bash
@@ -240,7 +209,6 @@ jobs:
                   for line in content.splitlines():
                       if re.search(r"compile.?sdk", line, re.I):
                           match = re.search(r'["\'](\d+)["\']', line)
-
                           if match:
                               versions.append(int(match.group(1)))
 
@@ -256,7 +224,6 @@ jobs:
           echo "Detected compileSdk: $SDK_VERSION"
           echo "version=$SDK_VERSION" >> "$GITHUB_OUTPUT"
 
-      # 8. Install Android components
       - name: Install Android SDK components
         shell: bash
         env:
@@ -271,9 +238,43 @@ jobs:
             "platforms;android-$SDK_VERSION" \
             "build-tools;36.0.0"
 
-          echo "Android components installed."
+      - name: Generate missing Debug Keystore
+        shell: bash
+        run: |
+          set -euo pipefail
 
-      # 9. IMPORTANT: Gradle 9.3.1
+          KEYSTORE="$GITHUB_WORKSPACE/.build/cinepro/debug.keystore"
+
+          mkdir -p "$(dirname "$KEYSTORE")"
+
+          if [ ! -s "$KEYSTORE" ]; then
+            echo "Generating missing Android Debug Keystore..."
+
+            keytool -genkeypair \
+              -v \
+              -keystore "$KEYSTORE" \
+              -storetype JKS \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US" \
+              -noprompt
+          else
+            echo "Existing Debug Keystore found."
+          fi
+
+          test -s "$KEYSTORE"
+
+          keytool -list \
+            -keystore "$KEYSTORE" \
+            -storepass android \
+            -alias androiddebugkey
+
+          echo "Debug Keystore is ready."
+
       - name: Setup Gradle 9.3.1
         uses: gradle/actions/setup-gradle@v4
         with:
@@ -281,7 +282,6 @@ jobs:
           cache-disabled: false
           add-job-summary: always
 
-      # 10. Verify build environment
       - name: Verify build environment
         shell: bash
         env:
@@ -289,19 +289,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "Java:"
           java -version
-
-          echo "Gradle:"
           gradle --version
 
-          echo "Android SDK:"
-          echo "$ANDROID_HOME"
-
-          echo "Project:"
           cd "$PROJECT_DIR"
-          pwd
-          ls -la
 
           GRADLE_VERSION="$(gradle --version | \
             awk '/^Gradle / {print $2; exit}')"
@@ -311,10 +302,10 @@ jobs:
             exit 1
           fi
 
-          echo "Correct Gradle version confirmed."
+          test -s "$GITHUB_WORKSPACE/.build/cinepro/debug.keystore"
 
-      # 11. Build APK using installed Gradle
-      # Do NOT use ./gradlew here.
+          echo "Build environment verified."
+
       - name: Build Android Debug APK
         shell: bash
         env:
@@ -326,8 +317,7 @@ jobs:
 
           printf 'sdk.dir=%s\n' "$ANDROID_HOME" > local.properties
 
-          echo "Starting Android build..."
-          echo "Using installed Gradle 9.3.1."
+          echo "Building CinePro APK with Gradle 9.3.1..."
 
           gradle \
             --no-daemon \
@@ -338,7 +328,6 @@ jobs:
 
           echo "Gradle build completed."
 
-      # 12. Find and collect APK
       - name: Collect APK
         shell: bash
         env:
@@ -369,33 +358,28 @@ jobs:
           ]
 
           if not apks:
-              raise SystemExit(
-                  "No APK was generated by Gradle."
-              )
+              raise SystemExit("No APK was generated by Gradle.")
 
           apks.sort()
 
           for index, apk in enumerate(apks, 1):
-              if len(apks) == 1:
-                  name = "CinePro-Cinema-Camera.apk"
-              else:
-                  name = f"CinePro-{index}-{apk.name}"
+              name = (
+                  "CinePro-Cinema-Camera.apk"
+                  if len(apks) == 1
+                  else f"CinePro-{index}-{apk.name}"
+              )
 
               target = output / name
               shutil.copy2(apk, target)
 
               print(
-                  "APK:",
-                  target.name,
-                  "Size:",
-                  target.stat().st_size,
-                  "bytes"
+                  "APK:", target.name,
+                  "Size:", target.stat().st_size, "bytes"
               )
           PY
 
           ls -lh "$OUTPUT"
 
-      # 13. Verify APK
       - name: Verify APK
         shell: bash
         run: |
@@ -412,9 +396,14 @@ jobs:
           find output -maxdepth 1 -type f -name '*.apk' \
             -exec file {} \;
 
+          APKSIGNER="$ANDROID_HOME/build-tools/36.0.0/apksigner"
+
+          for APK in output/*.apk; do
+            "$APKSIGNER" verify --verbose "$APK"
+          done
+
           echo "APK verification completed."
 
-      # 14. Upload APK
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
@@ -424,7 +413,6 @@ jobs:
           retention-days: 14
           compression-level: 0
 
-      # 15. Build summary
       - name: Build summary
         if: always()
         shell: bash
