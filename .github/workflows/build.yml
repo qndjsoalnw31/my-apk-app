@@ -26,13 +26,15 @@ jobs:
     env:
       JAVA_TOOL_OPTIONS: -Xmx4g -Dfile.encoding=UTF-8
       GRADLE_OPTS: -Xmx4g -XX:MaxMetaspaceSize=1g
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
 
     steps:
       # 1. تحميل المستودع
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. إعداد Java بدون Gradle cache
+      # 2. إعداد Java
       - name: Setup Java
         uses: actions/setup-java@v5
         with:
@@ -40,16 +42,48 @@ jobs:
           java-version: '17'
 
       # 3. إعداد Android SDK
+      # مهم: لا نطلب حزمة tools القديمة
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
+          accept-android-sdk-licenses: true
+          log-accepted-android-sdk-licenses: false
 
-      - name: Accept Android licenses
+      # 4. التحقق من أدوات Android
+      - name: Verify Android SDK
         shell: bash
         run: |
-          set -e
-          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          set -euo pipefail
 
-      # 4. فحص ملف المشروع
+          echo "ANDROID_HOME=$ANDROID_HOME"
+
+          if [ ! -d "$ANDROID_HOME" ]; then
+            echo "::error::Android SDK directory not found."
+            exit 1
+          fi
+
+          SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" \
+            -type f -name sdkmanager 2>/dev/null | head -n 1)"
+
+          if [ -z "$SDKMANAGER" ]; then
+            echo "::error::sdkmanager was not found."
+            exit 1
+          fi
+
+          echo "SDK Manager: $SDKMANAGER"
+          echo "ANDROID_SDK_MANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
+
+          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
+          echo "$(dirname "$SDKMANAGER")" >> "$GITHUB_PATH"
+
+          yes | "$SDKMANAGER" \
+            --sdk_root="$ANDROID_HOME" \
+            --licenses >/dev/null 2>&1 || true
+
+          echo "Android SDK verification completed."
+
+      # 5. التحقق من ملف ZIP
       - name: Verify project ZIP
         shell: bash
         run: |
@@ -59,6 +93,7 @@ jobs:
 
           if [ ! -f "$ZIP" ]; then
             echo "::error::cinepro-cinema-camera.zip was not found."
+            echo "Repository files:"
             find "$GITHUB_WORKSPACE" -maxdepth 3 -type f
             exit 1
           fi
@@ -68,12 +103,15 @@ jobs:
             exit 1
           fi
 
-          unzip -tq "$ZIP"
+          if ! unzip -tq "$ZIP"; then
+            echo "::error::ZIP archive is corrupted."
+            exit 1
+          fi
 
           echo "ZIP archive is valid."
           ls -lh "$ZIP"
 
-      # 5. استخراج المشروع داخل مساحة العمل
+      # 6. استخراج المشروع وفحص بنيته
       - name: Extract and detect Android project
         id: project
         shell: bash
@@ -133,7 +171,7 @@ jobs:
           if not settings:
               raise SystemExit(
                   "No settings.gradle or settings.gradle.kts found. "
-                  "The ZIP may not contain an Android Gradle project."
+                  "The ZIP does not appear to contain a Gradle project."
               )
 
           roots = sorted(
@@ -154,32 +192,31 @@ jobs:
           manifests = list(root.rglob("AndroidManifest.xml"))
 
           if not manifests:
-              raise SystemExit(
-                  "AndroidManifest.xml was not found."
-              )
+              raise SystemExit("AndroidManifest.xml was not found.")
 
-          if not any(
-              (root / name).exists()
-              for name in ("gradlew", "gradlew.bat")
-          ) and not (root / "gradle/wrapper/gradle-wrapper.properties").exists():
-              print("WARNING: Gradle Wrapper is missing.")
+          if not (root / "gradlew").is_file():
+              print("Gradle wrapper script is missing.")
+              print("The workflow will use installed Gradle.")
 
-          print("Android project root:", root)
-          print("Manifest count:", len(manifests))
+          print("Project root:", root)
+          print("Manifest files:", len(manifests))
 
-          pathlib.Path(
-              destination.parent / "project-root.txt"
-          ).write_text(str(root))
+          marker = destination.parent / "project-root.txt"
+          marker.write_text(str(root))
+
           PY
 
           PROJECT_DIR="$(cat "$GITHUB_WORKSPACE/.build/project-root.txt")"
 
           echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
 
+          echo "Project directory:"
+          echo "$PROJECT_DIR"
+
           echo "Project files:"
           find "$PROJECT_DIR" -maxdepth 3 -type f | head -100
 
-      # 6. اكتشاف compileSdk من ملفات Gradle
+      # 7. اكتشاف compileSdk
       - name: Detect Android SDK version
         id: sdk
         shell: bash
@@ -213,11 +250,13 @@ jobs:
               except OSError:
                   continue
 
-              for pattern in (
+              patterns = (
                   r"\bcompileSdk(?:Version)?\s*[=(]?\s*(\d+)",
                   r"\bcompileSdk\s*=\s*(\d+)",
                   r"compileSdk\s*\(\s*(\d+)\s*\)"
-              ):
+              )
+
+              for pattern in patterns:
                   candidates.extend(
                       int(x) for x in re.findall(pattern, content)
                   )
@@ -230,6 +269,7 @@ jobs:
                           re.IGNORECASE
                       ):
                           match = re.search(r'["\'](\d+)["\']', line)
+
                           if match:
                               candidates.append(int(match.group(1)))
 
@@ -237,10 +277,15 @@ jobs:
           PY
           )"
 
+          if ! [[ "$SDK_VERSION" =~ ^[0-9]+$ ]]; then
+            echo "::error::Invalid compileSdk value."
+            exit 1
+          fi
+
           echo "Detected compileSdk: $SDK_VERSION"
           echo "version=$SDK_VERSION" >> "$GITHUB_OUTPUT"
 
-      # 7. تثبيت منصات Android وأدوات البناء الشائعة
+      # 8. تثبيت منصة Android المطلوبة
       - name: Install Android SDK components
         shell: bash
         env:
@@ -248,21 +293,33 @@ jobs:
         run: |
           set -euo pipefail
 
-          PACKAGES=(
-            "platform-tools"
-            "platforms;android-$SDK_VERSION"
+          echo "Installing Android SDK packages..."
+
+          yes | "$ANDROID_SDK_MANAGER" \
+            --sdk_root="$ANDROID_HOME" \
+            --licenses >/dev/null 2>&1 || true
+
+          "$ANDROID_SDK_MANAGER" \
+            --sdk_root="$ANDROID_HOME" \
+            --install \
+            "platform-tools" \
+            "platforms;android-$SDK_VERSION" \
             "build-tools;36.0.0"
-          )
 
-          sdkmanager "${PACKAGES[@]}"
+          echo "Installed SDK packages:"
+          "$ANDROID_SDK_MANAGER" \
+            --sdk_root="$ANDROID_HOME" \
+            --list_installed
 
-      # 8. إعداد Gradle بعد استخراج المشروع
+      # 9. إعداد Gradle
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.14.3'
+          cache-disabled: false
+          add-job-summary: always
 
-      # 9. فحص Java وGradle
+      # 10. فحص بيئة البناء
       - name: Check build environment
         shell: bash
         env:
@@ -270,24 +327,29 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "Java version:"
+          echo "Java:"
           java -version
 
-          echo "Gradle version:"
+          echo "Gradle:"
           gradle --version
 
           echo "Android SDK:"
           echo "$ANDROID_HOME"
 
+          echo "Project:"
           cd "$PROJECT_DIR"
-
-          echo "Project root:"
           pwd
 
-          echo "Gradle configuration:"
+          echo "Project structure:"
           ls -la
 
-      # 10. بناء التطبيق
+          if [ ! -f "settings.gradle" ] && \
+             [ ! -f "settings.gradle.kts" ]; then
+            echo "::error::Gradle settings file is missing."
+            exit 1
+          fi
+
+      # 11. بناء APK
       - name: Build Android Debug APK
         shell: bash
         env:
@@ -300,14 +362,15 @@ jobs:
           printf 'sdk.dir=%s\n' "$ANDROID_HOME" > local.properties
 
           if [ -f "./gradlew" ]; then
-            chmod +x ./gradlew
-
             echo "Using project Gradle Wrapper."
+
+            chmod +x ./gradlew
 
             ./gradlew \
               --no-daemon \
               --stacktrace \
               --console=plain \
+              --warning-mode all \
               assembleDebug
 
           else
@@ -317,10 +380,13 @@ jobs:
               --no-daemon \
               --stacktrace \
               --console=plain \
+              --warning-mode all \
               assembleDebug
           fi
 
-      # 11. البحث عن APK ونسخه
+          echo "Gradle build command completed."
+
+      # 12. جمع ملفات APK
       - name: Collect APK
         shell: bash
         env:
@@ -352,7 +418,7 @@ jobs:
 
           if not apks:
               raise SystemExit(
-                  "Build completed but no APK was generated."
+                  "Build finished but no APK file was found."
               )
 
           apks.sort()
@@ -371,11 +437,37 @@ jobs:
                   target.stat().st_size,
                   "bytes"
               )
+
           PY
 
+          echo "APK files:"
           ls -lh "$OUTPUT"
 
-      # 12. رفع ملفات APK
+      # 13. فحص APK
+      - name: Verify APK files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          COUNT="$(find output -maxdepth 1 -type f -name '*.apk' | wc -l)"
+
+          if [ "$COUNT" -lt 1 ]; then
+            echo "::error::No APK files available."
+            exit 1
+          fi
+
+          while IFS= read -r APK; do
+            if [ ! -s "$APK" ]; then
+              echo "::error::Empty APK: $APK"
+              exit 1
+            fi
+
+            echo "Verified: $APK"
+            file "$APK"
+
+          done < <(find output -maxdepth 1 -type f -name '*.apk')
+
+      # 14. رفع APK
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
@@ -383,18 +475,26 @@ jobs:
           path: output/*.apk
           if-no-files-found: error
           retention-days: 14
+          compression-level: 0
 
-      # 13. ملخص البناء
+      # 15. ملخص النتيجة
       - name: Build summary
         if: always()
         shell: bash
         run: |
           {
-            echo "## CinePro APK Build"
+            echo "# CinePro APK Build"
             echo ""
+
             if [ -d "$GITHUB_WORKSPACE/output" ]; then
-              ls -lh "$GITHUB_WORKSPACE/output"
+              echo "## Generated APK files"
+              ls -lh "$GITHUB_WORKSPACE/output" || true
             else
-              echo "APK output was not generated."
+              echo "No APK output directory was generated."
             fi
+
+            echo ""
+            echo "Commit: $GITHUB_SHA"
+            echo ""
+            echo "Workflow: $GITHUB_WORKFLOW"
           } >> "$GITHUB_STEP_SUMMARY"
