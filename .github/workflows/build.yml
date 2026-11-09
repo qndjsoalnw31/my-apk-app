@@ -1,54 +1,40 @@
-name: Build Substack Downloader APK
+name: Build CinePro Cinema Camera APK
 
 on:
   push:
     branches:
       - main
-
+    paths:
+      - 'cinepro-cinema-camera.zip'
+      - '.github/workflows/build.yml'
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: substack-apk-${{ github.ref }}
+  group: cinepro-apk-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   build:
-    name: Build Substack Downloader
+    name: Build CinePro Android APK
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     env:
       GRADLE_OPTS: "-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8"
 
     steps:
-      # 1. Download repository files
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      # Initialize a diagnostic log even if setup fails.
-      - name: Initialize diagnostics
-        shell: bash
-        run: |
-          set -eu
-          {
-            echo "Substack Downloader build diagnostics"
-            echo "Run ID: $GITHUB_RUN_ID"
-            echo "Commit: $GITHUB_SHA"
-            echo "Runner: $RUNNER_OS"
-            echo "Started: $(date -u)"
-          } > "$GITHUB_WORKSPACE/gradle-build.log"
-
-      # 2. Install Java 21 because the app targets Java 21.
-      - name: Set up JDK 21
+      - name: Set up JDK 17
         uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: "21"
+          java-version: '17'
 
-      # 3. Configure Android SDK.
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
 
@@ -60,243 +46,153 @@ jobs:
           yes | sdkmanager --licenses
           set -o pipefail
 
-      - name: Install required Android SDK packages
+      - name: Install Android SDK packages
         shell: bash
         run: |
           set -euo pipefail
-
           sdkmanager \
             "platform-tools" \
-            "platforms;android-36" \
             "platforms;android-36.1" \
             "build-tools;36.0.0"
 
-      # 4. Install the Gradle version compatible with AGP 9.1.1.
       - name: Set up Gradle 9.3.1
         uses: gradle/actions/setup-gradle@v6
         with:
-          gradle-version: "9.3.1"
+          gradle-version: '9.3.1'
 
-      # 5. Verify and extract the exact archive.
-      - name: Extract substack-downloader.zip
+      - name: Verify and extract CinePro project
+        id: extract
         shell: bash
+        env:
+          EXPECTED_SHA256: a7316216e038bfa5bf0b4c8a2ce9025b716e5cd4d9f791de84ecd3fb6e4b7bf7
         run: |
           set -euo pipefail
 
-          ZIP_FILE="$GITHUB_WORKSPACE/substack-downloader.zip"
-          EXTRACT_DIR="$RUNNER_TEMP/substack-downloader"
+          ARCHIVE="$GITHUB_WORKSPACE/cinepro-cinema-camera.zip"
+          PROJECT_DIR="$RUNNER_TEMP/cinepro-project"
 
-          echo "Checking project archive..."
-
-          if [[ ! -f "$ZIP_FILE" ]]; then
-            echo "::error::substack-downloader.zip was not found."
-            find "$GITHUB_WORKSPACE" \
-              -maxdepth 3 -type f -iname '*.zip' -print || true
+          if [[ ! -f "$ARCHIVE" ]]; then
+            echo "::error::cinepro-cinema-camera.zip was not found in the repository root."
+            find "$GITHUB_WORKSPACE" -maxdepth 3 -type f -iname '*.zip' -print || true
             exit 1
           fi
 
-          if ! unzip -tq "$ZIP_FILE"; then
-            echo "::error::The ZIP archive is damaged."
-            exit 1
-          fi
+          echo "$EXPECTED_SHA256  $ARCHIVE" | sha256sum --check
+          unzip -tq "$ARCHIVE"
 
-          if ! unzip -Z1 "$ZIP_FILE" | \
-            grep -E '(^|/)settings\.gradle(\.kts)?$' \
-            >/dev/null; then
-            echo "::error::Gradle settings file is missing from ZIP."
-            exit 1
-          fi
+          rm -rf "$PROJECT_DIR"
+          mkdir -p "$PROJECT_DIR"
 
-          rm -rf "$EXTRACT_DIR"
-          mkdir -p "$EXTRACT_DIR"
-          unzip -q "$ZIP_FILE" -d "$EXTRACT_DIR"
+          python3 - "$ARCHIVE" "$PROJECT_DIR" <<'PY'
+          import pathlib
+          import sys
+          import zipfile
 
-          SETTINGS_FILE="$(
-            find "$EXTRACT_DIR" -type f \
-              \( -name settings.gradle.kts \
-                 -o -name settings.gradle \) \
-              -not -path '*/.gradle/*' \
-              -print -quit
-          )"
+          archive = pathlib.Path(sys.argv[1])
+          destination = pathlib.Path(sys.argv[2]).resolve()
 
-          if [[ -z "$SETTINGS_FILE" ]]; then
-            echo "::error::Could not locate Gradle project root."
-            exit 1
-          fi
+          with zipfile.ZipFile(archive) as zf:
+              for entry in zf.infolist():
+                  target = (destination / entry.filename).resolve()
+                  if not target.is_relative_to(destination):
+                      raise SystemExit(f"Unsafe ZIP path: {entry.filename}")
+              zf.extractall(destination)
 
-          PROJECT_DIR="$(dirname "$SETTINGS_FILE")"
+          required = [
+              destination / "settings.gradle.kts",
+              destination / "build.gradle.kts",
+              destination / "app" / "build.gradle.kts",
+              destination / "app" / "src" / "main" / "AndroidManifest.xml",
+              destination / "gradle" / "libs.versions.toml",
+          ]
 
-          if [[ ! -f "$PROJECT_DIR/build.gradle.kts" && \
-                ! -f "$PROJECT_DIR/build.gradle" ]]; then
-            echo "::error::Root Gradle build file is missing."
-            exit 1
-          fi
+          missing = [str(path) for path in required if not path.is_file()]
 
-          if [[ ! -f "$PROJECT_DIR/app/build.gradle.kts" && \
-                ! -f "$PROJECT_DIR/app/build.gradle" ]]; then
-            echo "::error::Android app module is missing."
-            exit 1
-          fi
+          if missing:
+              raise SystemExit(
+                  "Required CinePro project files are missing: " + ", ".join(missing)
+              )
+          PY
 
-          if [[ ! -f "$PROJECT_DIR/app/src/main/AndroidManifest.xml" ]]; then
-            echo "::error::AndroidManifest.xml is missing."
-            exit 1
-          fi
-
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-
-          echo "Project root: $PROJECT_DIR"
-          echo "Project files:"
+          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+          echo "CinePro project extracted successfully."
           ls -la "$PROJECT_DIR"
 
-      # 6. Configure the Android SDK path.
-      - name: Configure local.properties
+      - name: Configure optional Gemini API key
+        if: ${{ secrets.GEMINI_API_KEY != '' }}
         shell: bash
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          PROJECT_DIR: ${{ steps.extract.outputs.project_dir }}
         run: |
           set -euo pipefail
+          printf 'GEMINI_API_KEY=%s\n' "$GEMINI_API_KEY" > "$PROJECT_DIR/.env"
 
-          cd "$PROJECT_DIR"
-
-          if [[ -z "${ANDROID_HOME:-}" ]]; then
-            echo "::error::ANDROID_HOME is not defined."
-            exit 1
-          fi
-
-          printf 'sdk.dir=%s\n' "$ANDROID_HOME" > local.properties
-
-          echo "Android SDK configured."
-
-      # 7. IMPORTANT:
-      # The project's app/build.gradle.kts uses
-      # ${rootDir}/debug.keystore for debugConfig.
-      # The ZIP does not contain this ignored file.
-      # Generate the expected key before Gradle builds the APK.
-      - name: Create missing Debug keystore
+      - name: Create required debug keystore
         shell: bash
+        env:
+          PROJECT_DIR: ${{ steps.extract.outputs.project_dir }}
         run: |
           set -euo pipefail
 
           KEYSTORE="$PROJECT_DIR/debug.keystore"
 
-          if keytool -list \
-              -keystore "$KEYSTORE" \
-              -storepass android \
-              -alias androiddebugkey \
-              >/dev/null 2>&1; then
-            echo "A usable Debug keystore already exists."
-          else
-            echo "Creating Android Debug keystore..."
-
-            rm -f "$KEYSTORE"
-
-            keytool -genkeypair -v \
-              -keystore "$KEYSTORE" \
-              -storetype JKS \
-              -storepass android \
-              -alias androiddebugkey \
-              -keypass android \
-              -dname "CN=Android Debug,O=Android,C=US" \
-              -keyalg RSA \
-              -keysize 2048 \
-              -validity 10000 \
-              -noprompt
-          fi
+          keytool -genkeypair -v -noprompt \
+            -keystore "$KEYSTORE" \
+            -storetype JKS \
+            -storepass android \
+            -alias androiddebugkey \
+            -keypass android \
+            -dname "CN=Android Debug,O=Android,C=US" \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000
 
           keytool -list \
             -keystore "$KEYSTORE" \
             -storepass android \
             -alias androiddebugkey
 
-      # 8. Compile and capture the full Gradle output.
-      - name: Build Debug APK
-        id: build_apk
+      - name: Build CinePro Debug APK
         shell: bash
+        env:
+          PROJECT_DIR: ${{ steps.extract.outputs.project_dir }}
         run: |
           set -euo pipefail
 
-          cd "$PROJECT_DIR"
+          printf 'sdk.dir=%s\n' "$ANDROID_HOME" > "$PROJECT_DIR/local.properties"
 
-          LOG_FILE="$GITHUB_WORKSPACE/gradle-build.log"
-
-          echo "Java version:"
           java -version
-
-          echo "Gradle version:"
           gradle --version
 
-          echo "Starting Android APK build..."
-
-          set +e
           gradle \
             --no-daemon \
             --no-configuration-cache \
-            --no-build-cache \
             --stacktrace \
             --console=plain \
-            :app:assembleDebug \
-            2>&1 | tee "$LOG_FILE"
+            -p "$PROJECT_DIR" \
+            :app:assembleDebug
 
-          BUILD_STATUS=${PIPESTATUS[0]}
-          set -e
+          APK_SOURCE="$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
 
-          if [[ "$BUILD_STATUS" -ne 0 ]]; then
-            echo ""
-            echo "========== GRADLE ERROR SUMMARY =========="
-
-            grep -n -E \
-              'FAILURE:|What went wrong:|Execution failed|Task .* FAILED|Caused by:|error:|Could not resolve|Could not find|Keystore|signing' \
-              "$LOG_FILE" | tail -n 200 || true
-
-            echo ""
-            echo "========== LAST 250 LOG LINES =========="
-
-            tail -n 250 "$LOG_FILE" || true
-
-            exit "$BUILD_STATUS"
-          fi
-
-          echo "Gradle build completed."
-
-          # Locate the APK instead of assuming an output path.
-          APK_SOURCE="$(
-            find "$PROJECT_DIR/app/build/outputs/apk" \
-              -type f -name '*.apk' -print -quit 2>/dev/null || true
-          )"
-
-          if [[ -z "$APK_SOURCE" || ! -f "$APK_SOURCE" ]]; then
-            echo "::error::Build finished but no APK was found."
-            find "$PROJECT_DIR" \
-              -type f -name '*.apk' -print || true
+          if [[ ! -s "$APK_SOURCE" ]]; then
+            echo "::error::Gradle completed but the expected APK was not created."
+            find "$PROJECT_DIR/app/build/outputs" -type f -name '*.apk' -print || true
             exit 1
           fi
 
           mkdir -p "$GITHUB_WORKSPACE/output"
 
           cp "$APK_SOURCE" \
-            "$GITHUB_WORKSPACE/output/Substack-Downloader-debug.apk"
+            "$GITHUB_WORKSPACE/output/CinePro-Cinema-Camera.apk"
 
-          echo "APK_SOURCE=$APK_SOURCE" >> "$GITHUB_ENV"
+          ls -lh "$GITHUB_WORKSPACE/output/CinePro-Cinema-Camera.apk"
 
-          echo "APK successfully created:"
-          ls -lh "$GITHUB_WORKSPACE/output/Substack-Downloader-debug.apk"
-
-      # 9. Upload APK only when the build succeeds.
-      - name: Upload Substack Downloader APK
-        if: success()
+      - name: Upload CinePro APK
         uses: actions/upload-artifact@v7
         with:
-          name: Substack-Downloader-APK
-          path: output/Substack-Downloader-debug.apk
+          name: CinePro-Cinema-Camera-APK
+          path: output/CinePro-Cinema-Camera.apk
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
-
-      # 10. Keep the complete build log even if compilation fails.
-      - name: Upload build diagnostics
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: Substack-Build-Diagnostics-${{ github.run_number }}
-          path: gradle-build.log
-          if-no-files-found: warn
-          retention-days: 7
